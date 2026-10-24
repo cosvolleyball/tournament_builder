@@ -1,0 +1,31 @@
+# ==========================================
+# Tournament Builder - Git Ignore Rules
+# ==========================================
+
+# Installed dependencies
+# Recreated automatically with npm install
+node_modules/
+
+# Production build output
+dist/
+
+# Cloudflare local development files
+.wrangler/
+
+# Local environment variables and secrets
+.env
+.env.*
+!.env.example
+
+# Cloudflare local secrets
+.dev.vars
+.dev.vars.*
+
+# Test coverage output
+coverage/
+
+# macOS system files
+.DS_Store
+
+# Log files
+*.log
