@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import {
   ArrowLeft, ArrowRight, ArrowUpRight, CalendarDays, Check,
@@ -37,35 +37,103 @@ function App() {
   const [error, setError] = useState('');
   const [toast, setToast] = useState('');
   const [mobileMenu, setMobileMenu] = useState(false);
+  const [loginOpen, setLoginOpen] = useState(false);
+
+  // After an explicit logout, prevent history navigation from redisplaying the
+  // previous organizer workspace. A fresh direct public tournament link is still
+  // readable when the tournament has been published.
+  const signedOutHere = useRef(false);
+  const previousUserId = useRef<string | null>(null);
+  // Discard results from requests started under a previous authenticated user.
+  const workspaceVersion = useRef(0);
   const owner = demoMode || !!(session?.user.id && bundle && session.user.id === bundle.tournament.owner_id);
+
+  /**
+   * Remove organizer-only data on logout. This is a client-side privacy measure;
+   * real access control is still enforced by Supabase Row Level Security.
+   * replaceState drops the current detail URL without creating another history
+   * entry. The Back handler below guards older entries in this browser tab.
+   */
+  const clearPrivateWorkspace = () => {
+    workspaceVersion.current += 1;
+    setRecords([]);
+    setBundle(null);
+    setScreen('home');
+    setActiveId(null);
+    setLoginOpen(false);
+    setMobileMenu(false);
+    setError('');
+    setToast('');
+    setLoading(false);
+    window.history.replaceState(null, '', window.location.pathname + window.location.hash);
+  };
 
   useEffect(() => {
     if (!supabase) return;
-    supabase.auth.getSession().then(({ data, error: authError }) => {
-      if (authError) setError(authError.message);
-      setSession(data.session); setAuthChecked(true);
-    });
-    const { data: listener } = supabase.auth.onAuthStateChange((_event, nextSession) => {
-      setSession(nextSession); setAuthChecked(true);
+
+    // Supabase emits INITIAL_SESSION after checking stored login credentials.
+    // Avoid a second competing getSession request that could restore old state.
+    const { data: listener } = supabase.auth.onAuthStateChange((event, nextSession) => {
+      if (event === 'SIGNED_OUT') {
+        signedOutHere.current = true;
+        previousUserId.current = null;
+        setSession(null);
+        clearPrivateWorkspace();
+      } else {
+        const nextUserId = nextSession?.user.id ?? null;
+        if (previousUserId.current && nextUserId && previousUserId.current !== nextUserId) {
+          // Prevent data from the prior organizer appearing when switching users.
+          clearPrivateWorkspace();
+        }
+        if (nextUserId) signedOutHere.current = false;
+        previousUserId.current = nextUserId;
+        setSession(nextSession);
+      }
+      setAuthChecked(true);
     });
     return () => listener.subscription.unsubscribe();
   }, []);
 
+  const userId = session?.user.id ?? null;
   useEffect(() => {
     if (!authChecked) return;
-    listTournaments(session?.user.id ?? null).then(setRecords).catch(e => setError(String(e.message ?? e)));
-  }, [session, authChecked]);
+    if (!demoMode && !userId) {
+      setRecords([]);
+      return;
+    }
+    let cancelled = false;
+    listTournaments(userId)
+      .then(next => { if (!cancelled) setRecords(next); })
+      .catch(e => { if (!cancelled) setError(String(e.message ?? e)); });
+    return () => { cancelled = true; };
+  }, [userId, authChecked]);
 
   useEffect(() => {
-    if (!activeId || screen !== 'detail') return;
-    setLoading(true); setError('');
-    getTournament(activeId).then(setBundle).catch(e => setError(String(e.message ?? e))).finally(() => setLoading(false));
-  }, [activeId, screen]);
+    // Clear old details immediately when a new detail load begins. Ignore
+    // responses from a previous login, tournament, or unmounted effect.
+    if (!activeId || screen !== 'detail' || !authChecked) return;
+    let cancelled = false;
+    setBundle(null);
+    setLoading(true);
+    setError('');
+    getTournament(activeId)
+      .then(next => { if (!cancelled) setBundle(next); })
+      .catch(e => { if (!cancelled) setError(String(e.message ?? e)); })
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+  }, [activeId, screen, authChecked, userId]);
 
   useEffect(() => {
     const handler = () => {
+      if (signedOutHere.current && !demoMode) {
+        // Browsers keep history entries; we can prevent them rendering private
+        // content, but cannot erase the browser's entire Back history.
+        clearPrivateWorkspace();
+        return;
+      }
       const id = new URLSearchParams(window.location.search).get('t');
-      setActiveId(id); setScreen(id ? 'detail' : 'home');
+      setActiveId(id);
+      setScreen(id ? 'detail' : 'home');
     };
     window.addEventListener('popstate', handler);
     return () => window.removeEventListener('popstate', handler);
@@ -84,7 +152,9 @@ function App() {
     setScreen(where); setActiveId(id); setMobileMenu(false); setError('');
   };
   const reload = async (id: string) => {
+    const version = workspaceVersion.current;
     const [next, summaries] = await Promise.all([getTournament(id), listTournaments(session?.user.id ?? null)]);
+    if (workspaceVersion.current !== version) return;
     setBundle(next); setRecords(summaries);
   };
   const perform = async (fn: () => Promise<void>, success: string) => {
@@ -95,9 +165,12 @@ function App() {
   };
   const handleCreate = async (input: NewTournamentInput) => {
     const created = createBundle(input);
+    const version = workspaceVersion.current;
     await perform(async () => {
       await createTournament(created, session?.user.id ?? null);
-      setRecords(await listTournaments(session?.user.id ?? null));
+      const next = await listTournaments(session?.user.id ?? null);
+      if (workspaceVersion.current !== version) return;
+      setRecords(next);
       navigate('detail', created.tournament.id);
     }, 'Tournament created successfully.');
   };
@@ -118,19 +191,46 @@ function App() {
       setToast('Score saved and standings updated.');
     } finally { setLoading(false); }
   };
-  const signIn = async () => {
-    setError('');
-    const { error: authError } = await supabase!.auth.signInWithOAuth({ provider: 'google', options: { redirectTo: window.location.origin } });
-    if (authError) setError(authError.message);
+  // The alpha build uses the pre-created Supabase email/password account.
+  // Public signups are disabled at the Supabase project level.
+  const signIn = () => setLoginOpen(true);
+  const submitLogin = async (email: string, password: string) => {
+    if (!supabase) return;
+    const { error: authError } = await supabase.auth.signInWithPassword({email, password});
+    if (authError) throw new Error(authError.message);
+    setLoginOpen(false);
+    setToast('Signed in successfully.');
+  };
+  const handleSignOut = async () => {
+    if (!supabase) return;
+    try {
+      const { error: authError } = await supabase.auth.signOut();
+      if (authError) throw authError;
+      // The SIGNED_OUT event above clears all local tournament state.
+      // Also enforce the reset explicitly in case the event was delayed.
+      signedOutHere.current = true;
+      setSession(null);
+      clearPrivateWorkspace();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    }
   };
   const handleDelete = async () => {
     if (!bundle || !window.confirm(`Permanently delete “${bundle.tournament.name}”? This cannot be undone.`)) return;
+    const id = bundle.tournament.id;
+    const version = workspaceVersion.current;
     await perform(async () => {
-      await deleteTournament(bundle.tournament.id);
-      setRecords(await listTournaments(session?.user.id ?? null));
-      setBundle(null); navigate('home');
+      await deleteTournament(id);
+      const next = await listTournaments(session?.user.id ?? null);
+      if (workspaceVersion.current !== version) return;
+      setRecords(next);
+      setBundle(null);
+      navigate('home');
     }, 'Tournament deleted.');
   };
+  // Never pass stale organizer data to visible components after signout.
+  const authenticatedWorkspace = demoMode || !!session;
+  const visibleRecords = authenticatedWorkspace ? records : [];
   const showHome = screen === 'home';
   return (
     <div className="app-shell">
@@ -141,43 +241,66 @@ function App() {
         </div>
         <div className="sidebar-content">
           <div className="sidebar-label">WORKSPACE</div>
-          <button className={`side-link ${showHome ? 'selected' : ''}`} onClick={() => navigate('home')}><LayoutDashboard size={18}/> Dashboard</button>
+          <button className={`side-link ${showHome ? 'selected' : ''}`} onClick={() => navigate('home')}><LayoutDashboard size={18}/> {authenticatedWorkspace ? 'Dashboard' : 'Home'}</button>
+          {authenticatedWorkspace && <>
           <button className={`side-link ${screen === 'new' ? 'selected' : ''}`} onClick={() => navigate('new')}><Plus size={19}/> New tournament</button>
           <div className="sidebar-label space-above">YOUR TOURNAMENTS</div>
-          {records.length ? records.slice(0, 7).map(t => (
+          {visibleRecords.length ? visibleRecords.slice(0, 7).map(t => (
             <button key={t.id} className={`side-link tournament-link ${activeId === t.id ? 'selected' : ''}`} onClick={() => navigate('detail', t.id)}>
               <span className="mini-dot"/> <span className="truncate">{t.name}</span>
             </button>
           )) : <div className="sidebar-empty">Your tournaments will appear here.</div>}
+          </>}
         </div>
         <div className="sidebar-footer">
           <div className="footer-badge"><ShieldCheck size={16}/><span>{demoMode ? 'LOCAL DEMO MODE' : 'SUPABASE CONNECTED'}</span></div>
           <p>{demoMode ? 'Data is saved only in this browser.' : 'Protected by database access policies.'}</p>
-          <div className="footer-bottom"><span>BUILD 0.1 · FOUNDATION</span><GitBranch size={17}/></div>
+          <div className="footer-bottom"><span>BUILD 0.2 · ALPHA</span><GitBranch size={17}/></div>
         </div>
       </aside>
       <main className="main-area">
         <header className="topbar">
           <button className="icon-button mobile-menu" onClick={() => setMobileMenu(v => !v)} aria-label="Open menu"><Menu size={21}/></button>
-          <div className="breadcrumb"><span>Workspace</span><ChevronRight size={15}/><strong>{screen === 'new' ? 'New tournament' : screen === 'detail' ? (bundle?.tournament.name ?? 'Tournament') : 'Overview'}</strong></div>
+          <div className="breadcrumb"><span>Workspace</span><ChevronRight size={15}/><strong>{!authenticatedWorkspace && screen === 'home' ? 'Home' : screen === 'new' ? 'New tournament' : screen === 'detail' ? (bundle?.tournament.name ?? 'Tournament') : 'Overview'}</strong></div>
           <div className="topbar-actions">
-            {demoMode ? <span className="mode-pill"><span className="online-dot"/> Demo workspace</span> : !session ? <button className="button button-outline small" onClick={signIn}>Sign in with Google</button>
-              : <button className="account-button" onClick={() => supabase!.auth.signOut()} title="Sign out"><span className="avatar">{(session.user.email?.[0] ?? 'U').toUpperCase()}</span><span className="account-email">{session.user.email}</span><span className="signout-label">Sign out</span></button>}
+            {demoMode ? <span className="mode-pill"><span className="online-dot"/> Demo workspace</span> : !session ? <button className="button button-outline small" onClick={signIn}>Organizer sign in</button>
+              : <button className="account-button" onClick={handleSignOut} title="Sign out"><span className="avatar">{(session.user.email?.[0] ?? 'U').toUpperCase()}</span><span className="account-email">{session.user.email}</span><span className="signout-label">Sign out</span></button>}
           </div>
         </header>
         <div className="content">
           {error && <div className="error-alert" role="alert"><strong>Something needs attention</strong><span>{error}</span><button onClick={() => setError('')} aria-label="Dismiss error"><X size={16}/></button></div>}
           {!authChecked ? <div className="center-message">Checking your session…</div>
-            : screen === 'home' ? <Dashboard records={records} onNew={() => navigate('new')} onOpen={id => navigate('detail', id)} isSignedIn={demoMode || !!session} signIn={signIn}/>
+            : screen === 'home' ? (authenticatedWorkspace
+                ? <Dashboard records={visibleRecords} onNew={() => navigate('new')} onOpen={id => navigate('detail', id)} isSignedIn signIn={signIn}/>
+                : <PublicHome onSignIn={signIn}/>)
+            : screen === 'new' && !authenticatedWorkspace ? <PublicHome onSignIn={signIn}/>
             : screen === 'new' ? <NewWizard onBack={() => navigate('home')} onCreate={handleCreate} busy={loading}/>
             : loading && !bundle ? <div className="center-message">Loading tournament…</div>
             : bundle && activeId === bundle.tournament.id ? <TournamentPage bundle={bundle} isOwner={owner} busy={loading} onBack={() => navigate('home')} onStatus={handleStatus} onScore={handleScore} onDelete={handleDelete}/>
             : <div className="center-message">Tournament not found or not accessible. <button className="text-link" onClick={() => navigate('home')}>Back to dashboard</button></div>}
         </div>
       </main>
+      {loginOpen && <AlphaLogin onClose={() => setLoginOpen(false)} onSubmit={submitLogin}/>}
       {toast && <div className="toast" role="status"><CheckCircle2 size={18}/>{toast}</div>}
     </div>
   );
+}
+
+/** Public landing screen never receives or renders an organizer's records. */
+function PublicHome({ onSignIn }: { onSignIn: () => void }) {
+  return <div className="page-enter public-home">
+    <span className="eyebrow">TOURNAMENT MANAGEMENT, SIMPLIFIED</span>
+    <div className="page-heading">
+      <div><h1>Run the game.<br/><span>We'll handle the rest.</span></h1>
+        <p>Create tournaments, manage pool play and track scores in one place.</p></div>
+    </div>
+    <div className="public-welcome white-card">
+      <LockKeyhole size={24}/>
+      <h2>Organizer access</h2>
+      <p>Sign in to view and manage your tournaments. Published results can still be viewed using their public links.</p>
+      <button className="button button-primary" onClick={onSignIn}>Organizer sign in <ArrowRight size={17}/></button>
+    </div>
+  </div>;
 }
 
 function Dashboard({ records, onNew, onOpen, isSignedIn, signIn }: {
@@ -187,7 +310,7 @@ function Dashboard({ records, onNew, onOpen, isSignedIn, signIn }: {
     <div className="page-enter">
       <div className="welcome-line"><span className="eyebrow">TOURNAMENT MANAGEMENT, SIMPLIFIED</span></div>
       <div className="page-heading"><div><h1>Run the game.<br/><span>We'll handle the rest.</span></h1><p>From the first pool match to the final point. All your tournaments, all in one place.</p></div>
-        <button className="button button-primary heading-cta" onClick={isSignedIn ? onNew : signIn}>{isSignedIn ? <><Plus size={17}/> Create tournament</> : 'Get started with Google'}<ArrowRight size={17}/></button>
+        <button className="button button-primary heading-cta" onClick={isSignedIn ? onNew : signIn}>{isSignedIn ? <><Plus size={17}/> Create tournament</> : 'Organizer sign in'}<ArrowRight size={17}/></button>
       </div>
       <div className="metrics-grid">
         <Metric icon={<Trophy size={20}/>} label="My tournaments" value={records.length.toString()} hint="All formats"/>
@@ -306,13 +429,17 @@ function TournamentPage({ bundle, isOwner, busy, onBack, onStatus, onScore, onDe
       <button className="button button-outline" onClick={() => setTab('pools')}>View pools and schedule <ArrowRight size={16}/></button></div>
       <div className="white-card"><div className="card-heading"><h2>Your pools</h2><span className="subtle-tag">{bundle.pools.length} total</span></div>
         <div className="pool-summary-list">{bundle.pools.map(p => <button key={p.id} onClick={() => {setActivePool(p.id);setTab('pools');}}><span className="pool-letter">{p.label.slice(-1)}</span><div><strong>{p.label}</strong><small>{bundle.poolTeams.filter(x=>x.pool_id===p.id).length} teams · {bundle.matches.filter(x=>x.pool_id===p.id).length} matches</small></div><ChevronRight size={17}/></button>)}</div>
-        {isOwner && <button className="danger-text" onClick={onDelete}>Permanently delete tournament</button>}</div></div>}
+      </div></div>}
     {tab === 'pools' && <div className="pool-play-area"><div className="pool-switcher">{bundle.pools.map(pool => <button key={pool.id} className={firstPool===pool.id?'active':''} onClick={()=>setActivePool(pool.id)}>{pool.label}</button>)}</div>
       {bundle.pools.filter(p=>p.id===firstPool).map(pool => <PoolPanel key={pool.id} pool={pool} bundle={bundle} isOwner={isOwner} teamName={teamName} onEdit={setEditingMatch}/>)}</div>}
     {tab === 'playoffs' && <div className="white-card playoff-preview"><div className="playoff-icon"><Swords size={26}/></div><span className="eyebrow">UPCOMING MILESTONE</span><h2>Playoff brackets</h2><p>Gold and Silver configurations are saved. The elimination bracket engine, qualification approval, and automatic advancement will be added in the next development milestone.</p>
       <div className="division-preview">{bundle.divisions.map(d=><div key={d.id}><div className="division-preview-heading"><Medal size={18}/><strong>{d.name} division</strong><span className="format-pill">{d.format === 'double'?'Double elimination':'Single elimination'}</span></div>
         <div className="candidate-list">{(d.name==='Gold'?qualifications.gold:qualifications.silver).map((c,i)=><div key={i}><span>{c.team}</span><small>{c.pool}</small></div>)}</div></div>)}</div>
       <div className="info-inline center"><ShieldCheck size={17}/> Provisional placements only. No official playoff seeds or brackets have been generated.</div>
+    </div>}
+    {isOwner && tab === 'overview' && <div className="tournament-delete-area">
+      <span>Remove this tournament and all its results permanently.</span>
+      <button type="button" className="danger-text" disabled={busy} onClick={onDelete}>Permanently delete tournament</button>
     </div>}
     {editingMatch && <ScoreModal key={editingMatch.id} match={editingMatch} bundle={bundle} busy={busy} onClose={()=>setEditingMatch(null)} teamName={teamName}
       onSave={async pairs=>{await onScore(editingMatch,pairs);setEditingMatch(null);}}/>}
@@ -357,6 +484,45 @@ function ScoreModal({ match, bundle, teamName, busy, onClose, onSave }: {
       {error && <div className="form-error" role="alert">{error}</div>}
       <div className="modal-footer"><button className="button button-outline" type="button" onClick={onClose}>Cancel</button><button className="button button-primary" type="submit" disabled={busy}><Save size={16}/> {busy?'Saving…':'Save result'}</button></div>
     </form></div></div>;
+}
+
+
+/** Alpha login uses Supabase Auth directly. Password never enters the database tables. */
+function AlphaLogin({onClose, onSubmit}: {
+  onClose: () => void;
+  onSubmit: (email: string, password: string) => Promise<void>;
+}) {
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const login = async (event: React.FormEvent) => {
+    event.preventDefault(); setError(''); setBusy(true);
+    try { await onSubmit(email.trim(), password); }
+    catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); }
+    finally { setBusy(false); }
+  };
+  return <div className="modal-backdrop" onMouseDown={e => {
+    if(e.currentTarget === e.target) onClose();
+  }}>
+    <div className="modal alpha-login" role="dialog" aria-modal="true" aria-labelledby="alpha-login-heading">
+      <button className="modal-x" onClick={onClose} aria-label="Close sign in"><X size={19}/></button>
+      <div className="modal-kicker"><LockKeyhole size={18}/> PRIVATE ALPHA ACCESS</div>
+      <h2 id="alpha-login-heading">Organizer sign in</h2>
+      <p className="modal-desc">Use the email address and password of your approved organizer account.</p>
+      <form onSubmit={login}>
+        <div className="field"><label htmlFor="alpha-email">Email address</label>
+          <input id="alpha-email" type="email" required autoComplete="username" value={email}
+            onChange={e=>setEmail(e.target.value)}/></div>
+        <div className="field"><label htmlFor="alpha-password">Password</label>
+          <input id="alpha-password" type="password" required autoComplete="current-password" value={password}
+            onChange={e=>setPassword(e.target.value)}/></div>
+        {error && <div className="form-error" role="alert">{error}</div>}
+        <div className="modal-footer"><button className="button button-outline" type="button" onClick={onClose}>Cancel</button>
+          <button className="button button-primary" disabled={busy} type="submit">{busy?'Signing in…':'Sign in'}</button></div>
+      </form>
+    </div>
+  </div>;
 }
 
 createRoot(document.getElementById('root')!).render(<React.StrictMode><App/></React.StrictMode>);

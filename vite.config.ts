@@ -1,7 +1,9 @@
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
-import { cloudflare } from '@cloudflare/vite-plugin';
 
-export default defineConfig({
-  plugins: [react(), cloudflare()],
-});
+// Local development uses '/', while GitHub Pages publishes the built site
+// under https://cosvolleyball.github.io/tournament_builder/ .
+export default defineConfig(({ command }) => ({
+  plugins: [react()],
+  base: command === 'build' ? '/tournament_builder/' : '/',
+}));
