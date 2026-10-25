@@ -12,7 +12,7 @@
 import { createClient, type SupabaseClient } from '@supabase/supabase-js';
 import type {
   TournamentBundle, Tournament, TournamentStatus, SetScore,
-  Team, Pool, PoolTeam, Match, Division,
+  Team, Pool, PoolTeam, Match, Division, BracketAssignments, PlayoffMatch,
 } from './types';
 
 const supabaseUrl = import.meta.env.VITE_SUPABASE_URL?.trim();
@@ -104,6 +104,19 @@ export async function getTournament(id: string): Promise<TournamentBundle> {
   const rawMatches = matchesResult.data ?? [];
   // The `set_scores` table does not have tournament_id; filter by these match IDs.
   const matchIds = rawMatches.map(m => m.id);
+  // In v0.6, read playoff fixtures separately so pool standings never
+  // accidentally count elimination scores.
+  const playoffMatchResult = await db.from('matches').select('*')
+    .eq('division_id', chosen.id).eq('stage', 'playoff')
+    .order('round_number').order('sequence');
+  check(playoffMatchResult.error);
+  const rawPlayoffs = playoffMatchResult.data ?? [];
+  const playoffIds = rawPlayoffs.map(m => m.id);
+  const playoffScoreResult = playoffIds.length
+    ? await db.from('set_scores').select('*').in('match_id', playoffIds).order('set_number')
+    : { data: [], error: null };
+  check(playoffScoreResult.error);
+
   const scoreResult = matchIds.length
     ? await db.from('set_scores').select('*').in('match_id', matchIds).order('set_number')
     : { data: [], error: null };
@@ -125,14 +138,23 @@ export async function getTournament(id: string): Promise<TournamentBundle> {
   }));
   const divisions: Division[] = (bracketsResult.data ?? []).map(row => ({
     id: row.id, tournament_id: row.tournament_id, name: row.name,
-    format: row.format, bracket_reset: row.bracket_reset, sort_order: row.sort_order,
+    format: row.format, bracket_reset: row.bracket_reset, sort_order: row.sort_order, status: row.status,
   }));
   const scores: SetScore[] = (scoreResult.data ?? []).map(row => ({
     match_id: row.match_id, set_number: row.set_number, score_a: row.score_a, score_b: row.score_b,
   }));
+  const playoffMatches: PlayoffMatch[] = rawPlayoffs.map(row => ({
+    id: row.id, tournament_id: row.tournament_id, division_id: row.division_id,
+    bracket_id: row.bracket_id, team_a_id: row.team_a_id, team_b_id: row.team_b_id,
+    round_number: row.round_number, sequence: row.sequence, status: row.status,
+  }));
+  const playoffScores: SetScore[] = (playoffScoreResult.data ?? []).map(row => ({
+    match_id: row.match_id, set_number: row.set_number,
+    score_a: row.score_a, score_b: row.score_b,
+  }));
   return {
     tournament: asUiTournament(tournament, chosen), teams, pools,
-    poolTeams, matches, scores, divisions,
+    poolTeams, matches, scores, divisions, playoffMatches, playoffScores,
   };
 }
 
@@ -164,20 +186,42 @@ export async function createTournament(bundle: TournamentBundle, userId: string 
     });
     check(dError);
 
-    const groups = [
-      ['teams', bundle.teams.map(row => ({...row, division_id: newDivisionId}))],
-      ['pools', bundle.pools.map(row => ({...row, division_id: newDivisionId}))],
-      ['pool_teams', bundle.poolTeams.map(row => ({...row, division_id: newDivisionId}))],
-      ['playoff_brackets', bundle.divisions.map(row => ({
-        ...row, division_id: newDivisionId, status: 'draft',
-      }))],
-      ['matches', bundle.matches.map(row => ({
-        ...row, division_id: newDivisionId, stage: 'pool', bracket_id: null,
-      }))],
-    ] as const;
-    for (const [table, rows] of groups) {
-      if (!rows.length) continue;
-      const { error } = await db.from(table).insert(rows);
+    // Insert one table at a time, in foreign-key order. Using explicit table
+    // names also lets Supabase's TypeScript API check each row's shape, rather
+    // than combining incompatible row types into a union in a generic loop.
+    const teams = bundle.teams.map(row => ({ ...row, division_id: newDivisionId }));
+    if (teams.length) {
+      const { error } = await db.from('teams').insert(teams);
+      check(error);
+    }
+
+    const pools = bundle.pools.map(row => ({ ...row, division_id: newDivisionId }));
+    if (pools.length) {
+      const { error } = await db.from('pools').insert(pools);
+      check(error);
+    }
+
+    const assignments = bundle.poolTeams.map(row => ({
+      ...row, division_id: newDivisionId,
+    }));
+    if (assignments.length) {
+      const { error } = await db.from('pool_teams').insert(assignments);
+      check(error);
+    }
+
+    const brackets = bundle.divisions.map(row => ({
+      ...row, division_id: newDivisionId, status: 'draft',
+    }));
+    if (brackets.length) {
+      const { error } = await db.from('playoff_brackets').insert(brackets);
+      check(error);
+    }
+
+    const matches = bundle.matches.map(row => ({
+      ...row, division_id: newDivisionId, stage: 'pool', bracket_id: null,
+    }));
+    if (matches.length) {
+      const { error } = await db.from('matches').insert(matches);
       check(error);
     }
   } catch (cause) {
@@ -238,5 +282,42 @@ export async function submitScore(
 export async function deleteTournament(id: string): Promise<void> {
   if (demoMode) { writeDemo(demoBundles().filter(b => b.tournament.id !== id)); return; }
   const { error } = await requireDb().from('tournaments').delete().eq('id', id);
+  check(error);
+}
+
+
+/**
+ * Organizer-only, transactional pool finalization and bracket generation.
+ * The server validates the owner, all completed pool scores, all team IDs,
+ * and every bracket configuration. The client preview is NOT authoritative.
+ */
+export async function finalizePoolAndCreatePlayoffs(
+  bundle: TournamentBundle,
+  assignments: BracketAssignments,
+): Promise<void> {
+  if (demoMode) {
+    // Local demo supports preview only, not a fake persisted playoff engine.
+    throw new Error('Bracket finalization requires the connected Supabase project.');
+  }
+  const { error } = await requireDb().rpc('finalize_and_generate_single_elimination', {
+    p_tournament_id: bundle.tournament.id,
+    p_assignments: assignments,
+  });
+  check(error);
+}
+
+/**
+ * Public first-submission score entry for ONE playoff set. Server-side SQL
+ * locks the match, stores the score, and advances the winner in one transaction.
+ */
+export async function submitPlayoffScore(
+  matchId: string,
+  scoreA: number,
+  scoreB: number,
+): Promise<void> {
+  if (demoMode) throw new Error('Playoff scoring requires Supabase.');
+  const { error } = await requireDb().rpc('submit_public_playoff_result', {
+    p_match_id: matchId, p_score_a: scoreA, p_score_b: scoreB,
+  });
   check(error);
 }

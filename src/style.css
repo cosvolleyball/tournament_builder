@@ -30,3 +30,193 @@
 .review-standing { display: flex; justify-content: space-between; gap: 10px; padding: 8px 0; border-top: 1px solid #f0f2f6; font-size: 11px; }
 .review-standing small { color: #8191a7; text-align: right; }
 .review-format-note { color: #8191a7; font-size: 11px; line-height: 1.6; margin: 12px 0 0; }
+
+/* v0.6: Independent seeded single-elimination brackets. */
+.playoff-stack{display:flex;flex-direction:column;gap:20px}
+.playoff-review-card{padding:25px}
+.playoff-review-card h2,.playoff-approval h2{font-size:18px;margin:0 0 10px}
+.playoff-review-card .review-standings{margin-top:18px}
+.playoff-approval{display:flex;flex-direction:column;align-items:flex-start;gap:12px}
+.playoff-approval .checkbox-row{display:flex;align-items:center;gap:10px;font-size:12px}
+.playoff-approval input[type=checkbox]{width:17px;height:17px}
+.seeding-list{margin-top:21px;border-top:1px solid #eef2f7}
+.seeding-row{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:9px 0;border-bottom:1px solid #eef2f7;font-size:12px}
+.seed-actions{display:flex;gap:6px;align-items:center}
+.seed-actions select,.seed-actions button{border:1px solid #dce5f1;border-radius:7px;background:#fff;color:#395372;padding:6px 9px;font-size:11px}
+.seed-actions button{font-weight:800;min-width:30px}
+.bracket-rounds{display:flex;overflow-x:auto;gap:14px;padding:22px 0 4px;align-items:flex-start}
+.bracket-round{flex:1;min-width:195px;max-width:275px}
+.bracket-round h3{font-size:12px;color:#647b9a;text-transform:uppercase;letter-spacing:.75px;margin:0 0 12px}
+.bracket-match{border:1px solid #e4e9f1;border-radius:10px;margin-bottom:12px;overflow:hidden;background:#faffff;font-size:11px}
+.bracket-match>div{display:flex;justify-content:space-between;gap:9px;padding:11px 12px;border-bottom:1px solid #eaf0f6;min-height:38px}
+.bracket-match>div span{overflow-wrap:anywhere}
+.bracket-match>div strong{font-size:13px}
+.bracket-match>small{display:block;color:#8699ad;padding:7px 12px}
+.bracket-match>.score-action{margin:3px 9px 9px}
+@media(max-width:620px){.playoff-review-card{padding:18px 14px}.seeding-row{align-items:flex-start;flex-direction:column}.seed-actions{width:100%}.seed-actions select{flex:1}.bracket-round{min-width:180px}}
+
+/* ===========================================================================
+   v0.6.1 — Readable desktop typography and true elimination-bracket layout
+   ---------------------------------------------------------------------------
+   The original tiny 9–11px interface labels were difficult to read on desktop.
+   These targeted overrides deliberately preserve the existing mobile layout.
+   Bracket connectors are SVG paths so pairs align with their next-round match.
+   =========================================================================== */
+
+/* Scroll large brackets horizontally rather than shrinking match text. */
+.bracket-scroll {
+  overflow-x: auto;
+  overflow-y: hidden;
+  max-width: 100%;
+  margin-top: 18px;
+  padding: 14px 8px 20px;
+  border-radius: 12px;
+  border: 1px solid #d7e1ef;
+  background: #f8fbff;
+  scrollbar-color: #93a9c7 #e6edf7;
+  scrollbar-width: thin;
+}
+.bracket-scroll:focus-visible {
+  outline: 3px solid #2563eb;
+  outline-offset: 3px;
+}
+.elimination-tree {
+  position: relative;
+  isolation: isolate;
+  flex-shrink: 0;
+}
+.bracket-connectors {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  fill: none;
+  stroke: #8098bc;
+  stroke-width: 2.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.bracket-column {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  z-index: 1;
+}
+.bracket-column h3 {
+  margin: 0;
+  padding: 10px 0;
+  color: #243c61;
+  font-size: 14px;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: .65px;
+}
+/* Bordered cards use strong text contrast instead of almost-white rectangles. */
+.elimination-tree .bracket-match {
+  position: absolute;
+  left: 0;
+  width: 100%;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border: 2px solid #b7c8df;
+  border-radius: 10px;
+  background: #fff;
+  box-shadow: 0 3px 8px rgba(22, 40, 71, .08);
+  color: #172a47;
+}
+.elimination-tree .bracket-team {
+  min-height: 41px;
+  padding: 9px 12px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 9px;
+  border-bottom: 1px solid #dce5f0;
+  color: #223a59;
+  font-size: 14px;
+  font-weight: 700;
+}
+.elimination-tree .bracket-team span {
+  display: block;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+.elimination-tree .bracket-team strong {
+  color: #172b49;
+  font-size: 16px;
+  font-variant-numeric: tabular-nums;
+}
+.elimination-tree .bracket-team--winner {
+  background: #e8f6ee;
+  color: #14633e;
+  font-weight: 800;
+}
+.elimination-tree .bracket-team--winner strong {
+  color: #14633e;
+}
+.elimination-tree .bracket-match-status {
+  display: block;
+  padding: 8px 12px;
+  color: #4e6280;
+  background: #f2f6fb;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.2;
+  border: 0;
+}
+.elimination-tree .bracket-match--ready {
+  border-color: #2b68bd;
+  box-shadow: 0 0 0 2px rgba(43, 104, 189, .13);
+}
+.elimination-tree .bracket-match--completed {
+  border-color: #5a9c76;
+}
+.elimination-tree .bracket-match--bye {
+  border-style: dashed;
+  border-color: #98abc6;
+}
+.elimination-tree .bracket-match > .score-action {
+  align-self: flex-start;
+  margin: 5px 9px 6px;
+  padding: 5px 9px;
+  min-height: 27px;
+  color: #164d92;
+  border-color: #8eb5e5;
+  background: #eaf3ff;
+  font-size: 12px;
+  line-height: 1.1;
+}
+
+/* Improve routine desktop text: readable headings, labels and match rows. */
+@media (min-width: 901px) {
+  .sidebar-label, .sidebar-footer p, .footer-badge,
+  .eyebrow, .breadcrumb, .mode-pill, .account-button,
+  .section-heading p, .section-heading > span, .section-desc,
+  .t-card-meta, .field-hint, .review-format-note,
+  .review-standing, .seeding-row, .preview-formats,
+  .match-teams strong, .match-teams small, .match-seq,
+  .match-row .score-action, .table-caption,
+  .pool-summary-list small, .structure-rows small {
+    font-size: max(13px, 0.85rem);
+  }
+  .side-link, .button, .tabs button, .review-pool h3,
+  .standings-table td, .standings-table th {
+    font-size: 14px;
+  }
+  .standings-table th { color: #435a78; }
+  .standings-table td { color: #344968; }
+  .review-standing small, .match-teams small { color: #4f6482; }
+  .section-desc, .review-format-note { color: #4e627f; }
+  .footer-bottom, .brand-words small { font-size: 11px; }
+}
+
+/* Keep the bracket legible on phones; refine the actual phone layout after
+   deploying to GitHub Pages and testing on a device. */
+@media (max-width: 620px) {
+  .bracket-scroll { padding: 8px 6px 15px; }
+  .bracket-column h3 { font-size: 13px; }
+}

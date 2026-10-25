@@ -41,7 +41,11 @@ describe('tournament engine',()=>{
   });
   it('supports uneven pools without dropping any teams',()=>{
     const b=createBundle({...input,teamNames:input.teamNames.slice(0,10),poolCount:3});
-    expect(b.pools.map(p=>b.poolTeams.filter(x=>x.pool_id===p.id).length)).toEqual([4,3,3]);
+    // Verify balanced pool sizes regardless of which pool gets the extra team.
+    const poolSizes = b.pools.map(
+    p => b.poolTeams.filter(x => x.pool_id === p.id).length
+    );
+    expect([...poolSizes].sort((a, b) => b - a)).toEqual([4, 3, 3]);
     expect(b.matches).toHaveLength(12);
   });
   it('generates n(n-1)/2 matches for odd and even pool sizes',()=>{

@@ -16,11 +16,12 @@ export interface Match {
 export interface SetScore { match_id: string; set_number: number; score_a: number; score_b: number; }
 export interface Division {
   id: string; tournament_id: string; name: string; format: DivisionFormat;
-  bracket_reset: boolean; sort_order: number;
+  bracket_reset: boolean; sort_order: number; status?: 'draft' | 'ready' | 'active' | 'completed';
 }
 export interface TournamentBundle {
   tournament: Tournament; teams: Team[]; pools: Pool[]; poolTeams: PoolTeam[];
   matches: Match[]; scores: SetScore[]; divisions: Division[];
+  playoffMatches?: PlayoffMatch[]; playoffScores?: SetScore[];
 }
 /** One planned playoff bracket within a competition division (not a sport/skill division). */
 export interface PlannedBracket {
@@ -34,3 +35,18 @@ export interface NewTournamentInput {
   poolSets: 1 | 2; targetPoints: number; winByTwo: boolean; seedMode: SeedMode;
   playoffBrackets: PlannedBracket[];
 }
+
+/** One playoff match, independent of a pool matchup. */
+export interface PlayoffMatch {
+  id: string;
+  tournament_id: string;
+  division_id: string;
+  bracket_id: string;
+  team_a_id: string | null;
+  team_b_id: string | null;
+  round_number: number;
+  sequence: number;
+  status: 'scheduled' | 'completed' | 'bye' | 'forfeit';
+}
+/** A completed single-set match's score uses the existing set_scores table. */
+export type BracketAssignments = Record<string, string[]>;

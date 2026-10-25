@@ -4,13 +4,14 @@ import {
   ArrowLeft, ArrowRight, ArrowUpRight, CalendarDays, Check,
   CheckCircle2, ChevronRight, ClipboardList, Copy, ExternalLink, Flag,
   GitBranch, LayoutDashboard, ListChecks, LockKeyhole, Medal, Menu, Plus,
-  RefreshCw, Save, ShieldCheck, Shuffle, Sparkles, Swords, Trophy,
+  Save, ShieldCheck, Sparkles, Trophy,
   UsersRound, Volleyball, X,
 } from 'lucide-react';
 import type { Session } from '@supabase/supabase-js';
-import type { Match, NewTournamentInput, PlannedBracket, Pool, SetScore, Tournament, TournamentBundle } from './types';
+import type { BracketAssignments, Match, NewTournamentInput, PlannedBracket, PlayoffMatch, Pool, SetScore, Tournament, TournamentBundle } from './types';
 import { createBundle, scoreError, standingsForPool } from './engine';
-import { changeStatus, createTournament, deleteTournament, demoMode, getTournament, listTournaments, submitScore, supabase } from './repository';
+import { previewSingleElimination, suggestedAssignments, validateAssignments } from './playoffs';
+import { changeStatus, createTournament, deleteTournament, demoMode, finalizePoolAndCreatePlayoffs, getTournament, listTournaments, submitPlayoffScore, submitScore, supabase } from './repository';
 import './style.css';
 
 type Screen = 'home' | 'new' | 'detail';
@@ -216,6 +217,26 @@ function App() {
   };
   // The alpha build uses the pre-created Supabase email/password account.
   // Public signups are disabled at the Supabase project level.
+  /** Organizer review is authoritative only after Supabase validates every pool result and seed. */
+  const handleFinalizePlayoffs = async (assignments: BracketAssignments) => {
+    if (!bundle || !owner) throw new Error('Only an organizer may finalize pool play.');
+    const id = bundle.tournament.id;
+    await perform(async () => {
+      await finalizePoolAndCreatePlayoffs(bundle, assignments);
+      await reload(id);
+    }, bundle.divisions.length ? 'Pool play finalized. Playoff brackets generated.' : 'Final standings approved.');
+  };
+  /** Public visitors and organizers use the same first-submission-only RPC. */
+  const handlePlayoffScore = async (match: PlayoffMatch, scoreA: number, scoreB: number) => {
+    if (!bundle) return;
+    const id = bundle.tournament.id;
+    setLoading(true);
+    try {
+      await submitPlayoffScore(match.id, scoreA, scoreB);
+      await reload(id);
+      setToast('Playoff result recorded. Winner advanced automatically.');
+    } finally { setLoading(false); }
+  };
   const signIn = () => setLoginOpen(true);
   const submitLogin = async (email: string, password: string) => {
     if (!supabase) return;
@@ -278,7 +299,7 @@ function App() {
         <div className="sidebar-footer">
           <div className="footer-badge"><ShieldCheck size={16}/><span>{demoMode ? 'LOCAL DEMO MODE' : 'SUPABASE CONNECTED'}</span></div>
           <p>{demoMode ? 'Data is saved only in this browser.' : 'Protected by database access policies.'}</p>
-          <div className="footer-bottom"><span>BUILD 0.5 · ALPHA</span><GitBranch size={17}/></div>
+          <div className="footer-bottom"><span>BUILD 0.6 · ALPHA</span><GitBranch size={17}/></div>
         </div>
       </aside>
       <main className="main-area">
@@ -299,7 +320,7 @@ function App() {
             : screen === 'new' && !authenticatedWorkspace ? <PublicHome onSignIn={signIn}/>
             : screen === 'new' ? <NewWizard onBack={() => navigate('home')} onCreate={handleCreate} busy={loading}/>
             : loading && !bundle ? <div className="center-message">Loading tournament…</div>
-            : bundle && activeId === bundle.tournament.id ? <TournamentPage bundle={bundle} isOwner={owner} busy={loading} onBack={() => navigate('home')} onStatus={handleStatus} onScore={handleScore} onDelete={handleDelete}/>
+            : bundle && activeId === bundle.tournament.id ? <TournamentPage bundle={bundle} isOwner={owner} busy={loading} onBack={() => navigate('home')} onStatus={handleStatus} onScore={handleScore} onDelete={handleDelete} onFinalize={handleFinalizePlayoffs} onPlayoffScore={handlePlayoffScore}/>
             : <div className="center-message">Tournament not found or not accessible. <button className="text-link" onClick={() => navigate('home')}>Back to dashboard</button></div>}
         </div>
       </main>
@@ -449,10 +470,12 @@ function NewWizard({ onBack, onCreate, busy }: { onBack: () => void; onCreate: (
   </div>;
 }
 
-function TournamentPage({ bundle, isOwner, busy, onBack, onStatus, onScore, onDelete }: {
+function TournamentPage({ bundle, isOwner, busy, onBack, onStatus, onScore, onDelete, onFinalize, onPlayoffScore }: {
   bundle: TournamentBundle; isOwner: boolean; busy: boolean; onBack: () => void;
   onStatus: (next: 'published'|'pool_play') => Promise<void>; onScore: (match: Match, scores: Array<[number,number]>) => Promise<void>;
   onDelete: () => Promise<void>;
+  onFinalize: (assignments: BracketAssignments) => Promise<void>;
+  onPlayoffScore: (match: PlayoffMatch, scoreA: number, scoreB: number) => Promise<void>;
 }) {
   const [tab, setTab] = useState<DetailTab>('overview');
   const [activePool, setActivePool] = useState(bundle.pools[0]?.id ?? '');
@@ -484,20 +507,332 @@ function TournamentPage({ bundle, isOwner, busy, onBack, onStatus, onScore, onDe
       </div></div>}
     {tab === 'pools' && <div className="pool-play-area"><div className="pool-switcher">{bundle.pools.map(pool => <button key={pool.id} className={firstPool===pool.id?'active':''} onClick={()=>setActivePool(pool.id)}>{pool.label}</button>)}</div>
       {bundle.pools.filter(p=>p.id===firstPool).map(pool => <PoolPanel key={pool.id} pool={pool} bundle={bundle} isOwner={isOwner} teamName={teamName} onEdit={setEditingMatch}/>)}</div>}
-    {tab === 'playoffs' && <div className="white-card playoff-preview"><div className="playoff-icon"><Swords size={26}/></div><span className="eyebrow">ORGANIZER REVIEW</span><h2>{bundle.divisions.length ? 'Pool results & playoff planning' : 'Pool results review'}</h2>
-      <p>Review all set scores and pool standings before approving qualification or ending pool play. No official playoff seeds have been assigned.</p>
-      <div className="review-status"><strong>{complete} of {scheduled} pool matches recorded</strong><span>{complete===scheduled ? 'All results received — ready for organizer review' : `${scheduled-complete} matches are still awaiting scores`}</span></div>
-      <div className="review-standings">{bundle.pools.map(pool=><div className="review-pool" key={pool.id}><h3>{pool.label}</h3>{standingsForPool(bundle,pool.id).map(s=><div className="review-standing" key={s.team.id}><span>{s.rank}. {s.team.name}</span><small>{s.wins}–{s.losses} sets · {(s.winPct*100).toFixed(1)}%</small></div>)}</div>)}</div>
-      {bundle.divisions.length ? <div className="division-preview">{bundle.divisions.map(d=><div key={d.id}><div className="division-preview-heading"><Medal size={18}/><strong>{d.name} bracket</strong><span className="format-pill">{d.format === 'double'?'Double elimination':'Single elimination'}</span></div><p className="review-format-note">Qualification and seeding will be approved by the organizer before this bracket is generated.</p></div>)}</div> : <p className="review-format-note">This competition has no planned playoff brackets. Final standings will determine the result.</p>}
-      {isOwner ? <div className="info-inline center"><ShieldCheck size={17}/> Check scores in Pool play &amp; scores; the Finalize Pool Play action will be enabled alongside the bracket engine. Scores remain editable until then.</div>
-      : <div className="info-inline center"><ShieldCheck size={17}/> Pool standings are provisional until the organizer confirms the results.</div>}
-    </div>}
+    {tab === 'playoffs' && <PlayoffPanel key={bundle.tournament.id} bundle={bundle}
+      isOwner={isOwner} busy={busy} onFinalize={onFinalize}
+      onPlayoffScore={onPlayoffScore}/>}
     {isOwner && tab === 'overview' && <div className="tournament-delete-area">
       <span>Remove this tournament and all its results permanently.</span>
       <button type="button" className="danger-text" disabled={busy} onClick={onDelete}>Permanently delete tournament</button>
     </div>}
     {editingMatch && <ScoreModal key={editingMatch.id} match={editingMatch} bundle={bundle} busy={busy} onClose={()=>setEditingMatch(null)} teamName={teamName}
       onSave={async pairs=>{await onScore(editingMatch,pairs);setEditingMatch(null);}}/>}
+  </div>;
+}
+
+
+/**
+ * Draw a genuine single-elimination tree rather than unrelated columns.
+ *
+ * Each later-round match is centered between its two feeder matches. SVG
+ * elbows visually connect them. Geometry is derived only from the number of
+ * rounds/matches; scores, team names and advancement are still provided by the
+ * existing tournament engine and Supabase. This component changes display only.
+ *
+ * The horizontal scroll area also makes large brackets usable on small screens.
+ */
+type DiagramCard = {
+  id: string;
+  content: React.ReactNode;
+  state?: 'scheduled' | 'ready' | 'completed' | 'bye';
+};
+
+type DiagramRound = {
+  number: number;
+  cards: DiagramCard[];
+};
+
+function EliminationBracket({ label, rounds }: { label: string; rounds: DiagramRound[] }) {
+  if (!rounds.length) return null;
+
+  // Consistent dimensions keep every connector anchored to a match midpoint.
+  const cardWidth = 264;
+  const cardHeight = 154;
+  const gapWidth = 78;
+  const rowPitch = 178;
+  const titleHeight = 48;
+  const firstRoundCount = Math.max(1, rounds[0].cards.length);
+  const width = rounds.length * cardWidth + (rounds.length - 1) * gapWidth;
+  const height = titleHeight + firstRoundCount * rowPitch;
+  const cardCenter = (roundIndex: number, matchIndex: number) =>
+    titleHeight + (matchIndex + 0.5) * (2 ** roundIndex) * rowPitch;
+
+  // Conventional bracket elbows: two source matches join a single next-round
+  // match. Lines stay behind cards and do not capture mouse/touch input.
+  const connectors = rounds.slice(0, -1).flatMap((round, roundIndex) => {
+    const nextRound = rounds[roundIndex + 1];
+    const startX = roundIndex * (cardWidth + gapWidth) + cardWidth;
+    const elbowX = startX + gapWidth * 0.48;
+    const endX = startX + gapWidth;
+    return nextRound.cards.flatMap((_, matchIndex) => {
+      const sourceA = matchIndex * 2;
+      const sourceB = sourceA + 1;
+      if (sourceB >= round.cards.length) return [];
+      const topY = cardCenter(roundIndex, sourceA);
+      const bottomY = cardCenter(roundIndex, sourceB);
+      const destinationY = cardCenter(roundIndex + 1, matchIndex);
+      // Draw BOTH feeder arms into the same vertical join. The original path
+      // drew the upper arm and vertical join, but never reached the lower card.
+      // A second, separate segment runs from the join to the next-round card.
+      return [{
+        key: `${roundIndex}-${matchIndex}`,
+        d: `M ${startX} ${topY} H ${elbowX} V ${bottomY} H ${startX} M ${elbowX} ${destinationY} H ${endX}`,
+      }];
+    });
+  });
+
+  return <div className="bracket-scroll" role="region" aria-label={label} tabIndex={0}>
+    <div className="elimination-tree" style={{ width, height }}>
+      <svg className="bracket-connectors" width={width} height={height}
+        viewBox={`0 0 ${width} ${height}`} aria-hidden="true" focusable="false">
+        {connectors.map(connector => <path key={connector.key} d={connector.d}/>)}
+      </svg>
+      {rounds.map((round, roundIndex) => <section className="bracket-column"
+        key={round.number}
+        aria-label={roundIndex === rounds.length - 1 ? 'Final' : `Round ${round.number}`}
+        style={{ left: roundIndex * (cardWidth + gapWidth), width: cardWidth }}>
+        <h3>{roundIndex === rounds.length - 1 ? 'Final' : `Round ${round.number}`}</h3>
+        {round.cards.map((card, matchIndex) => <div key={card.id}
+          className={`bracket-match bracket-match--${card.state ?? 'scheduled'}`}
+          style={{ top: cardCenter(roundIndex, matchIndex) - cardHeight / 2, height: cardHeight }}>
+          {card.content}
+        </div>)}
+      </section>)}
+    </div>
+  </div>;
+}
+
+/**
+ * The organizer reviews every pool result and explicitly approves the final
+ * participants and seeds. Until confirmation, all assignments are local-only.
+ * The SQL RPC rechecks ownership, all results, and all team IDs atomically.
+ */
+function PlayoffPanel({ bundle, isOwner, busy, onFinalize, onPlayoffScore }: {
+  bundle: TournamentBundle; isOwner: boolean; busy: boolean;
+  onFinalize: (assignments: BracketAssignments) => Promise<void>;
+  onPlayoffScore: (match: PlayoffMatch, a: number, b: number) => Promise<void>;
+}) {
+  const [assignments, setAssignments] = useState<BracketAssignments>(() => suggestedAssignments(bundle));
+  const [confirmed, setConfirmed] = useState(false);
+  const [activeMatch, setActiveMatch] = useState<PlayoffMatch | null>(null);
+  const [saveError, setSaveError] = useState('');
+  const t = bundle.tournament;
+  const complete = bundle.matches.filter(m => m.status === 'completed').length;
+  const allComplete = complete === bundle.matches.length;
+  const running = t.status === 'playoffs' || t.status === 'completed';
+  const teamName = (id: string | null): string => id
+    ? bundle.teams.find(team => team.id === id)?.name ?? 'Unknown team'
+    : 'TBD';
+  const brackets = [...bundle.divisions].sort((a,b)=>a.sort_order-b.sort_order);
+  const assignmentError = validateAssignments(bundle, assignments);
+  const canFinalize = isOwner && !demoMode && t.status === 'pool_play'
+    && allComplete && !assignmentError && confirmed && !busy;
+
+  const moveTeam = (teamId: string, fromId: string, toId: string) => {
+    if (fromId === toId) return;
+    setConfirmed(false);
+    setAssignments(old => ({
+      ...old,
+      [fromId]: old[fromId].filter(id => id !== teamId),
+      [toId]: [...old[toId],teamId],
+    }));
+  };
+  const reorder = (bracketId: string, index: number, direction: number) => {
+    setConfirmed(false);
+    setAssignments(old => {
+      const next = [...old[bracketId]];
+      const other = index + direction;
+      if (other < 0 || other >= next.length) return old;
+      [next[index], next[other]] = [next[other], next[index]];
+      return {...old, [bracketId]: next};
+    });
+  };
+  const finalize = async () => {
+    setSaveError('');
+    if (!canFinalize) return;
+    const message = brackets.length
+      ? `Finalize all pool results and generate ${brackets.length} playoff bracket(s)?\n\nPool scores will lock. Playoff seeding cannot be changed once matches begin.`
+      : 'Approve final pool standings and complete this pool-only tournament? Pool scores will lock.';
+    if (!window.confirm(message)) return;
+    try { await onFinalize(assignments); }
+    catch (error) { setSaveError(error instanceof Error ? error.message : String(error)); }
+  };
+
+  return <div className="playoff-stack">
+    <div className="white-card playoff-review-card">
+      <div className="card-heading"><h2>{running ? 'Playoff brackets' : 'Organizer pool review'}</h2>
+        <span className="subtle-tag">{complete} of {bundle.matches.length} pool matches</span></div>
+      <p className="review-format-note">{running
+        ? 'Pool rankings are finalized. Follow results and advancing teams below.'
+        : allComplete ? 'All pool match scores are recorded. Review rankings and seed assignments before locking the results.'
+          : 'Pool play is in progress. Playoff assignments below are provisional until every pool match is recorded.'}</p>
+      <div className="review-standings">
+        {bundle.pools.map(pool => <div className="review-pool" key={pool.id}>
+          <h3>{pool.label}</h3>
+          {standingsForPool(bundle,pool.id).map(row => <div className="review-standing" key={row.team.id}>
+            <span>{row.rank}. {row.team.name}</span>
+            <small>{row.wins}–{row.losses} sets · {(row.winPct * 100).toFixed(1)}%</small>
+          </div>)}
+        </div>)}
+      </div>
+    </div>
+
+    {!running && brackets.length===0 && <div className="white-card playoff-review-card">
+      <h2>Pool play only</h2>
+      <p className="review-format-note">No playoff brackets were configured. Once every result is correct, the organizer can confirm final standings and complete the tournament.</p>
+    </div>}
+
+    {!running && brackets.map(bracket => {
+      const ids = assignments[bracket.id] ?? [];
+      const preview = bracket.format === 'single' && ids.length >= 2
+        ? previewSingleElimination(ids) : [];
+      return <div className="white-card playoff-review-card" key={bracket.id}>
+        <div className="card-heading"><div><h2>{bracket.name} bracket</h2>
+          <p className="section-desc">{bracket.format === 'single' ? 'Single elimination' : 'Double elimination (next milestone)'}</p></div>
+          <span className="subtle-tag">{ids.length} teams</span></div>
+        {isOwner && !demoMode && t.status === 'pool_play' && <div className="seeding-list">
+          <p className="review-format-note">Choose the bracket for each team and use arrows to adjust the seed order. Seed 1 is highest.</p>
+          {ids.map((id,index) => <div className="seeding-row" key={id}>
+            <strong>#{index+1} · {teamName(id)}</strong>
+            <div className="seed-actions">
+              <select aria-label={`Bracket for ${teamName(id)}`} value={bracket.id}
+                onChange={e=>moveTeam(id,bracket.id,e.target.value)}>
+                {brackets.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}
+              </select>
+              <button type="button" aria-label={`Move ${teamName(id)} up`} disabled={index===0}
+                onClick={()=>reorder(bracket.id,index,-1)}>↑</button>
+              <button type="button" aria-label={`Move ${teamName(id)} down`} disabled={index===ids.length-1}
+                onClick={()=>reorder(bracket.id,index,1)}>↓</button>
+            </div>
+          </div>)}
+        </div>}
+        {bracket.format === 'single' && !!preview.length && <EliminationBracket
+          label={`${bracket.name} bracket preview`}
+          rounds={Array.from(new Set(preview.map(match => match.round))).map(round => ({
+            number: round,
+            cards: preview.filter(match => match.round === round).map(match => ({
+              id: `${match.round}-${match.index}`,
+              content: <>
+                <div className="bracket-team">
+                  <span title={teamName(match.teamA)}>{match.round === 1
+                    ? `${match.seedA && match.seedA <= ids.length ? `#${match.seedA} · ` : ''}${match.teamA ? teamName(match.teamA) : 'BYE'}`
+                    : 'Winner of previous match'}</span>
+                </div>
+                <div className="bracket-team">
+                  <span title={teamName(match.teamB)}>{match.round === 1
+                    ? `${match.seedB && match.seedB <= ids.length ? `#${match.seedB} · ` : ''}${match.teamB ? teamName(match.teamB) : 'BYE'}`
+                    : 'Winner of previous match'}</span>
+                </div>
+                <small className="bracket-match-status">{match.round === 1 && (!match.teamA || !match.teamB)
+                  ? 'Automatic advance' : 'Awaiting result'}</small>
+              </>,
+              state: match.round === 1 && (!match.teamA || !match.teamB) ? 'bye' as const : 'scheduled' as const,
+            })),
+          }))}/>}
+        {bracket.format==='double' && <p className="review-format-note">This bracket is saved as a plan. Double-elimination generation is intentionally disabled until that engine is tested.</p>}
+      </div>;
+    })}
+
+    {!running && isOwner && <div className="white-card playoff-approval">
+      <h2>Approve pool results</h2>
+      <p className="review-format-note">Check all scores and final standings first. Pool results will be locked after finalization. Public visitors cannot generate brackets.</p>
+      {assignmentError && <p className="form-error" role="alert">{assignmentError}</p>}
+      {!allComplete && <p className="form-error">{bundle.matches.length - complete} pool matches still need a result.</p>}
+      {demoMode && <p className="review-format-note">Live bracket creation requires Supabase. Local demo can preview the seed assignments.</p>}
+      <label className="checkbox-row"><input type="checkbox" checked={confirmed} onChange={e=>setConfirmed(e.target.checked)}/>
+        <span>I have reviewed every pool result and approve these playoff seeds.</span></label>
+      {saveError && <p className="form-error" role="alert">{saveError}</p>}
+      <button className="button button-primary" type="button" disabled={!canFinalize} onClick={finalize}>
+        <ShieldCheck size={17}/> {brackets.length ? 'Finalize pool play & generate brackets' : 'Approve final standings'}
+      </button>
+    </div>}
+
+    {running && brackets.map(bracket => {
+      const matches = (bundle.playoffMatches ?? []).filter(m=>m.bracket_id===bracket.id);
+      const maxRound = Math.max(0,...matches.map(m=>m.round_number));
+      const championMatch = matches.find(m=>m.round_number===maxRound);
+      const championScore = (bundle.playoffScores??[]).find(s=>s.match_id===championMatch?.id);
+      const champion = championMatch && championMatch.status==='completed' && championScore
+        ? teamName(championScore.score_a>championScore.score_b?championMatch.team_a_id:championMatch.team_b_id)
+        : null;
+      return <div className="white-card playoff-review-card" key={bracket.id}>
+        <div className="card-heading"><div><h2>{bracket.name} bracket</h2>
+          <p className="section-desc">{bracket.format === 'single' ? 'Single elimination' : 'Double elimination'}</p></div>
+          <span className="subtle-tag">{champion ? `Champion: ${champion}` : bracket.status ?? 'Active'}</span></div>
+        <EliminationBracket
+          label={`${bracket.name} active playoff bracket`}
+          rounds={Array.from(new Set(matches.map(match => match.round_number))).map(round => ({
+            number: round,
+            cards: matches.filter(match => match.round_number === round).map(match => {
+              const score = (bundle.playoffScores ?? []).find(result => result.match_id === match.id);
+              const ready = match.status === 'scheduled' && !!match.team_a_id && !!match.team_b_id
+                && t.status === 'playoffs';
+              const winningTeamA = !!score && score.score_a > score.score_b;
+              const winningTeamB = !!score && score.score_b > score.score_a;
+              return {
+                id: match.id,
+                state: match.status === 'completed' ? 'completed' as const
+                  : match.status === 'bye' ? 'bye' as const : ready ? 'ready' as const : 'scheduled' as const,
+                content: <>
+                  <div className={`bracket-team ${winningTeamA ? 'bracket-team--winner' : ''}`}>
+                    <span title={teamName(match.team_a_id)}>{teamName(match.team_a_id)}</span>
+                    <strong>{score?.score_a ?? ''}</strong>
+                  </div>
+                  <div className={`bracket-team ${winningTeamB ? 'bracket-team--winner' : ''}`}>
+                    <span title={teamName(match.team_b_id)}>{match.status === 'bye' && !match.team_b_id
+                      ? 'BYE' : teamName(match.team_b_id)}</span>
+                    <strong>{score?.score_b ?? ''}</strong>
+                  </div>
+                  <small className="bracket-match-status">{match.status === 'bye'
+                    ? 'Automatic advance' : match.status === 'completed'
+                      ? 'Final result' : ready ? 'Ready for score' : 'Awaiting previous winners'}</small>
+                  {ready && <button className="score-action" type="button" disabled={busy}
+                    onClick={() => setActiveMatch(match)}>Enter score <ChevronRight size={14}/></button>}
+                </>,
+              };
+            }),
+          }))}/>
+
+      </div>;
+    })}
+    {activeMatch && <PlayoffScoreModal match={activeMatch} bundle={bundle} teamName={teamName}
+      busy={busy} onClose={()=>setActiveMatch(null)}
+      onSave={async (a,b)=>{await onPlayoffScore(activeMatch,a,b);setActiveMatch(null);}}/>}
+  </div>;
+}
+
+/** Account-free playoff result form. One set per playoff match in v0.6. */
+function PlayoffScoreModal({ match, bundle, teamName, busy, onClose, onSave }: {
+  match: PlayoffMatch; bundle: TournamentBundle; teamName: (id:string|null)=>string;
+  busy:boolean; onClose:()=>void; onSave:(a:number,b:number)=>Promise<void>;
+}) {
+  const [a,setA]=useState('');
+  const [b,setB]=useState('');
+  const [error,setError]=useState('');
+  const save=async (event:React.FormEvent)=>{
+    event.preventDefault();setError('');
+    const scoreA=a.trim()===''?NaN:Number(a);
+    const scoreB=b.trim()===''?NaN:Number(b);
+    const validation=scoreError([[scoreA,scoreB]],1,bundle.tournament.target_points,bundle.tournament.win_by_two);
+    if(validation){setError(validation);return;}
+    try {await onSave(scoreA,scoreB);}catch(err){setError(err instanceof Error?err.message:String(err));}
+  };
+  return <div className="modal-backdrop" onMouseDown={e=>{if(e.target===e.currentTarget)onClose();}}>
+    <div className="modal" role="dialog" aria-modal="true" aria-labelledby="playoff-score-title">
+      <button className="modal-x" type="button" onClick={onClose} aria-label="Close"><X size={19}/></button>
+      <div className="modal-kicker"><Trophy size={17}/> PLAYOFF · ROUND {match.round_number}</div>
+      <h2 id="playoff-score-title">Enter playoff result</h2>
+      <p className="modal-desc">One set to {bundle.tournament.target_points}{bundle.tournament.win_by_two?', win by two':''}. The winner automatically advances; submitted playoff scores cannot be corrected through this alpha interface yet.</p>
+      <form onSubmit={save}><div className="score-header"><strong>{teamName(match.team_a_id)}</strong><span>VS</span><strong>{teamName(match.team_b_id)}</strong></div>
+        <div className="score-entry-row"><span>Set 1</span>
+          <input aria-label="First team score" required type="number" min={0} max={999} value={a} onChange={e=>setA(e.target.value)}/>
+          <span>—</span>
+          <input aria-label="Second team score" required type="number" min={0} max={999} value={b} onChange={e=>setB(e.target.value)}/>
+        </div>
+        {error && <div className="form-error" role="alert">{error}</div>}
+        <div className="modal-footer"><button type="button" className="button button-outline" onClick={onClose}>Cancel</button>
+          <button type="submit" className="button button-primary" disabled={busy}><Save size={16}/> Submit result</button></div>
+      </form>
+    </div>
   </div>;
 }
 
