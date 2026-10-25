@@ -203,7 +203,12 @@ export async function changeStatus(id: string, status: TournamentStatus): Promis
 }
 
 /** Persist full pool results atomically via the SQL function from database v0.2. */
-export async function submitScore(id: string, matchId: string, scores: SetScore[]): Promise<void> {
+export async function submitScore(
+  id: string,
+  matchId: string,
+  scores: SetScore[],
+  publicEntry = false,
+): Promise<void> {
   if (demoMode) {
     const data = demoBundles();
     const bundle = data.find(b => b.tournament.id === id);
@@ -216,7 +221,11 @@ export async function submitScore(id: string, matchId: string, scores: SetScore[
     writeDemo(data);
     return;
   }
-  const { error } = await requireDb().rpc('submit_pool_result', {
+  // Public visitors may submit only a FIRST score. Organizers use the existing
+  // authenticated RPC, which can correct a recorded score. Server-side SQL
+  // validates the match state; hiding a button is not a security boundary.
+  const rpcName = publicEntry ? 'submit_public_pool_result' : 'submit_pool_result';
+  const { error } = await requireDb().rpc(rpcName, {
     p_match_id: matchId,
     p_scores: scores.map(s => ({
       set_number: s.set_number, score_a: s.score_a, score_b: s.score_b,

@@ -145,6 +145,29 @@ function App() {
     return () => window.clearTimeout(timeout);
   }, [toast]);
 
+  // Keep open tournament pages up to date for spectators without requiring
+  // Supabase Realtime replication settings. Scores are refreshed periodically
+  // when the tab is visible; a new score is reloaded immediately after saving.
+  useEffect(() => {
+    if (!supabase || !authChecked || screen !== 'detail' || !activeId) return;
+    const id = activeId;
+    let cancelled = false;
+    const refresh = async () => {
+      if (document.visibilityState !== 'visible') return;
+      const version = workspaceVersion.current;
+      try {
+        const next = await getTournament(id);
+        if (cancelled || workspaceVersion.current !== version) return;
+        setBundle(current => current?.tournament.id === id ? next : current);
+      } catch {
+        // A temporary network failure should not interrupt an active score form.
+        // Explicit actions still surface errors through their normal UI paths.
+      }
+    };
+    const timer = window.setInterval(refresh, 15000);
+    return () => { cancelled = true; window.clearInterval(timer); };
+  }, [authChecked, screen, activeId, userId]);
+
   const navigate = (where: Screen, id: string | null = null) => {
     if (where === 'new' && !demoMode && !session) { setToast('Sign in to create a tournament.'); return; }
     const url = id ? `?t=${encodeURIComponent(id)}` : window.location.pathname;
@@ -186,9 +209,9 @@ function App() {
     const scores: SetScore[] = pairs.map(([score_a, score_b], i) => ({ match_id: match.id, set_number: i + 1, score_a, score_b }));
     setLoading(true);
     try {
-      await submitScore(bundle.tournament.id, match.id, scores);
+      await submitScore(bundle.tournament.id, match.id, scores, !owner);
       await reload(bundle.tournament.id);
-      setToast('Score saved and standings updated.');
+      setToast(owner ? 'Score saved and standings updated.' : 'Score submitted. Only an organizer can correct it.');
     } finally { setLoading(false); }
   };
   // The alpha build uses the pre-created Supabase email/password account.
@@ -451,15 +474,22 @@ function PoolPanel({ pool, bundle, isOwner, teamName, onEdit }: {
 }) {
   const standings = standingsForPool(bundle,pool.id);
   const matches = bundle.matches.filter(m => m.pool_id === pool.id);
-  const permitted = isOwner && ['published','pool_play'].includes(bundle.tournament.status);
+  const status = bundle.tournament.status;
+  const ownerMayEdit = isOwner && ['published', 'pool_play'].includes(status);
+  // Players need no accounts. Once pool play starts they may submit the first
+  // score for a scheduled match, but cannot overwrite an existing result.
+  const publicMaySubmit = !isOwner && !demoMode && status === 'pool_play';
+  const permitted = ownerMayEdit || publicMaySubmit;
   return <div className="pool-columns"><div className="white-card"><div className="card-heading"><h2>{pool.label} standings</h2><span className="subtle-tag">Live results</span></div><div className="table-scroll"><table className="standings-table"><thead><tr><th>#</th><th>TEAM</th><th>SW</th><th>SL</th><th>WIN %</th><th>PF</th><th>PA</th></tr></thead><tbody>{standings.map(s=><tr key={s.team.id}><td><span className={`rank-number ${s.rank<=2?'top-rank':''}`}>{s.rank}</span></td><td className="team-cell">{s.team.name}</td><td>{s.wins}</td><td>{s.losses}</td><td className="pct-cell">{(s.winPct*100).toFixed(1)}%</td><td>{s.pointsFor}</td><td>{s.pointsAgainst}</td></tr>)}</tbody></table></div>
     <p className="table-caption">SW = sets won · SL = sets lost · PF/PA = points for/against. Ties: head-to-head for exactly two teams, then point ratio and normalized differential.</p></div>
     <div className="white-card"><div className="card-heading"><div><h2>Match schedule</h2><p className="section-desc">{matches.filter(m=>m.status==='completed').length} of {matches.length} complete</p></div><span className="subtle-tag">{bundle.tournament.pool_sets} set{bundle.tournament.pool_sets>1?'s':''} each</span></div>
       <div className="match-list">{matches.map(m=>{const scores = bundle.scores.filter(s=>s.match_id===m.id).sort((a,b)=>a.set_number-b.set_number);return <div className="match-row" key={m.id}><div className="match-left"><span className="match-seq">R{m.round_number}</span><div className="match-teams"><strong>{teamName(m.team_a_id)} <span>vs</span> {teamName(m.team_b_id)}</strong><small>{m.status==='completed'?'Final score':'Not played'}</small></div></div>
       <div className="match-right">{scores.length?<div className="small-scores">{scores.map(s=><span key={s.set_number}>{s.score_a}–{s.score_b}</span>)}</div>:<span className="awaiting">—</span>}
-        {permitted && <button className="score-action" onClick={()=>onEdit(m)}>{m.status==='completed'?'Edit':'Enter score'}<ChevronRight size={15}/></button>}
+        {permitted && (ownerMayEdit || m.status === 'scheduled') && <button className="score-action" onClick={()=>onEdit(m)}>{m.status==='completed'?'Edit score':isOwner?'Enter score':'Submit score'}<ChevronRight size={15}/></button>}
       </div></div>})}</div>
       {!permitted && isOwner && <p className="table-caption">Publish the tournament and start pool play to enable score entry.</p>}
+      {!isOwner && status === 'pool_play' && <p className="table-caption">Players can submit scores for unfinished matches without signing in. Once submitted, only the organizer can correct a result. Results refresh approximately every 15 seconds.</p>}
+      {!isOwner && status === 'published' && <p className="table-caption">The organizer has not started pool play yet. Scores will open for everyone when play begins.</p>}
     </div></div>;
 }
 function ScoreModal({ match, bundle, teamName, busy, onClose, onSave }: {
@@ -480,7 +510,7 @@ function ScoreModal({ match, bundle, teamName, busy, onClose, onSave }: {
     <div className="modal-kicker"><ClipboardList size={18}/> POOL PLAY · ROUND {match.round_number}</div><h2 id="score-dialog-title">Enter match score</h2><p className="modal-desc">Each set counts independently toward the standings. If there are two sets, a 1–1 split is allowed.</p>
     <form onSubmit={save}><div className="score-header"><strong>{teamName(match.team_a_id)}</strong><span>VS</span><strong>{teamName(match.team_b_id)}</strong></div>
       {pairs.map((row,i)=><div className="score-entry-row" key={i}><span>Set {i+1}</span><input aria-label={`Set ${i+1} ${teamName(match.team_a_id)} score`} required type="number" min={0} max={999} value={row[0]} onChange={e=>setPairs(old=>old.map((v,j)=>j===i?([e.target.value,v[1]] as [string,string]):v))}/><span>—</span><input aria-label={`Set ${i+1} ${teamName(match.team_b_id)} score`} required type="number" min={0} max={999} value={row[1]} onChange={e=>setPairs(old=>old.map((v,j)=>j===i?([v[0],e.target.value] as [string,string]):v))}/></div>)}
-      <div className="score-help">First to {bundle.tournament.target_points}{bundle.tournament.win_by_two?', win by 2':''}. Scores update all pool standings automatically.</div>
+      <div className="score-help">First to {bundle.tournament.target_points}{bundle.tournament.win_by_two?', win by 2':''}. Scores update all pool standings automatically. {match.status === 'scheduled' ? 'Once submitted publicly, only the organizer can correct this result.' : ''}</div>
       {error && <div className="form-error" role="alert">{error}</div>}
       <div className="modal-footer"><button className="button button-outline" type="button" onClick={onClose}>Cancel</button><button className="button button-primary" type="submit" disabled={busy}><Save size={16}/> {busy?'Saving…':'Save result'}</button></div>
     </form></div></div>;
