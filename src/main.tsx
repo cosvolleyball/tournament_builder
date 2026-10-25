@@ -11,7 +11,7 @@ import type { Session } from '@supabase/supabase-js';
 import type { BracketAssignments, Match, NewTournamentInput, PlannedBracket, PlayoffMatch, Pool, SetScore, Tournament, TournamentBundle } from './types';
 import { createBundle, scoreError, standingsForPool } from './engine';
 import { previewSingleElimination, suggestedAssignments, validateAssignments } from './playoffs';
-import { changeStatus, createTournament, deleteTournament, demoMode, finalizePoolAndCreatePlayoffs, getTournament, listTournaments, submitPlayoffScore, submitScore, supabase } from './repository';
+import { changeStatus, correctPlayoffScore, createTournament, deleteTournament, demoMode, finalizePoolAndCreatePlayoffs, getTournament, listTournaments, submitPlayoffScore, submitScore, supabase } from './repository';
 import './style.css';
 
 type Screen = 'home' | 'new' | 'detail';
@@ -226,15 +226,25 @@ function App() {
       await reload(id);
     }, bundle.divisions.length ? 'Pool play finalized. Playoff brackets generated.' : 'Final standings approved.');
   };
-  /** Public visitors and organizers use the same first-submission-only RPC. */
+  /**
+   * New playoff scores are open to players without sign-in; corrections of
+   * completed matches use a separate, owner-only RPC. Both refresh the bracket.
+   */
   const handlePlayoffScore = async (match: PlayoffMatch, scoreA: number, scoreB: number) => {
     if (!bundle) return;
     const id = bundle.tournament.id;
     setLoading(true);
     try {
-      await submitPlayoffScore(match.id, scoreA, scoreB);
+      if (match.status === 'completed') {
+        if (!owner) throw new Error('Only an organizer can correct completed playoff scores.');
+        await correctPlayoffScore(match.id, scoreA, scoreB);
+      } else {
+        await submitPlayoffScore(match.id, scoreA, scoreB);
+      }
       await reload(id);
-      setToast('Playoff result recorded. Winner advanced automatically.');
+      setToast(match.status === 'completed'
+        ? 'Playoff result corrected. Advancing team updated if needed.'
+        : 'Playoff result recorded. Winner advanced automatically.');
     } finally { setLoading(false); }
   };
   const signIn = () => setLoginOpen(true);
@@ -785,8 +795,11 @@ function PlayoffPanel({ bundle, isOwner, busy, onFinalize, onPlayoffScore }: {
                   <small className="bracket-match-status">{match.status === 'bye'
                     ? 'Automatic advance' : match.status === 'completed'
                       ? 'Final result' : ready ? 'Ready for score' : 'Awaiting previous winners'}</small>
-                  {ready && <button className="score-action" type="button" disabled={busy}
-                    onClick={() => setActiveMatch(match)}>Enter score <ChevronRight size={14}/></button>}
+                  {(ready || (isOwner && match.status === 'completed')) &&
+                    <button className="score-action" type="button" disabled={busy}
+                      onClick={() => setActiveMatch(match)}>
+                      {match.status === 'completed' ? 'Edit score' : 'Enter score'} <ChevronRight size={14}/>
+                    </button>}
                 </>,
               };
             }),
@@ -805,8 +818,11 @@ function PlayoffScoreModal({ match, bundle, teamName, busy, onClose, onSave }: {
   match: PlayoffMatch; bundle: TournamentBundle; teamName: (id:string|null)=>string;
   busy:boolean; onClose:()=>void; onSave:(a:number,b:number)=>Promise<void>;
 }) {
-  const [a,setA]=useState('');
-  const [b,setB]=useState('');
+  // For corrections, show the existing scores so organizers can fix a typo
+  // rather than re-entering the entire result from scratch.
+  const previous = bundle.playoffScores?.find(score => score.match_id === match.id);
+  const [a,setA]=useState(previous ? String(previous.score_a) : '');
+  const [b,setB]=useState(previous ? String(previous.score_b) : '');
   const [error,setError]=useState('');
   const save=async (event:React.FormEvent)=>{
     event.preventDefault();setError('');
@@ -820,8 +836,10 @@ function PlayoffScoreModal({ match, bundle, teamName, busy, onClose, onSave }: {
     <div className="modal" role="dialog" aria-modal="true" aria-labelledby="playoff-score-title">
       <button className="modal-x" type="button" onClick={onClose} aria-label="Close"><X size={19}/></button>
       <div className="modal-kicker"><Trophy size={17}/> PLAYOFF · ROUND {match.round_number}</div>
-      <h2 id="playoff-score-title">Enter playoff result</h2>
-      <p className="modal-desc">One set to {bundle.tournament.target_points}{bundle.tournament.win_by_two?', win by two':''}. The winner automatically advances; submitted playoff scores cannot be corrected through this alpha interface yet.</p>
+      <h2 id="playoff-score-title">{previous ? 'Correct playoff score' : 'Enter playoff result'}</h2>
+      <p className="modal-desc">One set to {bundle.tournament.target_points}{bundle.tournament.win_by_two?', win by two':''}. {previous
+        ? 'Only organizers may correct a result. If the winner changes, the next-round team updates automatically as long as that match has not started.'
+        : 'Once entered, the winner advances automatically. Players cannot overwrite submitted scores.'}</p>
       <form onSubmit={save}><div className="score-header"><strong>{teamName(match.team_a_id)}</strong><span>VS</span><strong>{teamName(match.team_b_id)}</strong></div>
         <div className="score-entry-row"><span>Set 1</span>
           <input aria-label="First team score" required type="number" min={0} max={999} value={a} onChange={e=>setA(e.target.value)}/>
@@ -830,7 +848,7 @@ function PlayoffScoreModal({ match, bundle, teamName, busy, onClose, onSave }: {
         </div>
         {error && <div className="form-error" role="alert">{error}</div>}
         <div className="modal-footer"><button type="button" className="button button-outline" onClick={onClose}>Cancel</button>
-          <button type="submit" className="button button-primary" disabled={busy}><Save size={16}/> Submit result</button></div>
+          <button type="submit" className="button button-primary" disabled={busy}><Save size={16}/> {previous ? 'Save correction' : 'Submit result'}</button></div>
       </form>
     </div>
   </div>;

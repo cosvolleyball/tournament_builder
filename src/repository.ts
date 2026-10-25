@@ -321,3 +321,26 @@ export async function submitPlayoffScore(
   });
   check(error);
 }
+
+
+/**
+ * Organizer-only correction for an already completed, single-set playoff match.
+ * Database RPC verifies tournament ownership and updates the next-round team
+ * slot atomically when a different team should have advanced.
+ *
+ * Public visitors must continue using submitPlayoffScore, which does NOT permit
+ * overwriting a completed result.
+ */
+export async function correctPlayoffScore(
+  matchId: string,
+  scoreA: number,
+  scoreB: number,
+): Promise<void> {
+  if (demoMode) throw new Error('Playoff score corrections require Supabase.');
+  const { error } = await requireDb().rpc('correct_single_elimination_result', {
+    p_match_id: matchId,
+    p_score_a: scoreA,
+    p_score_b: scoreB,
+  });
+  check(error);
+}
