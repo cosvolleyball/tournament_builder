@@ -48,6 +48,7 @@ function asUiTournament(row: any, settings: any): Tournament {
     pool_count: settings?.pool_count ?? 1, pool_sets: settings?.pool_sets ?? 2,
     target_points: settings?.target_points ?? 21,
     win_by_two: settings?.win_by_two ?? true,
+    point_cap: settings?.point_cap ?? null,
     seed_mode: settings?.seed_mode ?? 'snake',
   };
 }
@@ -127,6 +128,10 @@ export async function getTournament(id: string): Promise<TournamentBundle> {
   }));
   const pools: Pool[] = (poolsResult.data ?? []).map(row => ({
     id: row.id, tournament_id: row.tournament_id, label: row.label, sort_order: row.sort_order,
+    scoring_override: row.scoring_override ?? false,
+    target_points: row.target_points ?? null,
+    win_by_two: row.win_by_two ?? null,
+    point_cap: row.point_cap ?? null,
   }));
   const poolTeams: PoolTeam[] = (poolTeamsResult.data ?? []).map(row => ({
     tournament_id: row.tournament_id, pool_id: row.pool_id, team_id: row.team_id,
@@ -182,7 +187,8 @@ export async function createTournament(bundle: TournamentBundle, userId: string 
     const { error: dError } = await db.from('competition_divisions').insert({
       id: newDivisionId, tournament_id: t.id, name: 'Open', sort_order: 0,
       status: 'draft', pool_count: t.pool_count, pool_sets: t.pool_sets,
-      target_points: t.target_points, win_by_two: t.win_by_two, seed_mode: t.seed_mode,
+      target_points: t.target_points, win_by_two: t.win_by_two,
+      point_cap: t.point_cap ?? null, seed_mode: t.seed_mode,
     });
     check(dError);
 

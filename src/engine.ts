@@ -1,4 +1,4 @@
-import type { NewTournamentInput, TournamentBundle, Team, PoolTeam, Match, SetScore, Pool } from './types';
+import type { NewTournamentInput, TournamentBundle, Team, PoolTeam, Match, SetScore, Pool, ScoringRules } from './types';
 
 const newId = () => crypto.randomUUID();
 
@@ -59,13 +59,26 @@ export function createBundle(input: NewTournamentInput): TournamentBundle {
     id, owner_id: null, name: input.name.trim(), sport: input.sport.trim() || 'Volleyball',
     starts_on: input.startsOn || null, status: 'draft' as const, pool_count: input.poolCount,
     pool_sets: input.poolSets, target_points: input.targetPoints, win_by_two: input.winByTwo,
+    point_cap: input.pointCap ?? null,
     seed_mode: input.seedMode, created_at: new Date().toISOString(),
   };
   if (!tournament.name) throw new Error('Enter a tournament name.');
   const teams = input.teamNames.map((name, index) => ({ id: newId(), tournament_id: id, name: name.trim(), seed: index + 1 }));
-  const pools: Pool[] = Array.from({ length: input.poolCount }, (_, index) => ({
-    id: newId(), tournament_id: id, label: `Pool ${String.fromCharCode(65 + index)}`, sort_order: index + 1,
-  }));
+  const pools: Pool[] = Array.from({ length: input.poolCount }, (_, index) => {
+    const override = input.poolScoring?.[index];
+    return {
+      id: newId(), tournament_id: id, label: `Pool ${String.fromCharCode(65 + index)}`,
+      sort_order: index + 1,
+      scoring_override: override?.enabled ?? false,
+      target_points: override?.enabled ? override.targetPoints : null,
+      win_by_two: override?.enabled ? override.winByTwo : null,
+      point_cap: override?.enabled ? override.pointCap : null,
+    };
+  });
+  validateScoringRules({targetPoints: tournament.target_points, winByTwo: tournament.win_by_two, pointCap: tournament.point_cap ?? null});
+  for (const pool of pools) if (pool.scoring_override) {
+    validateScoringRules(scoringForPool({tournament, pools} as TournamentBundle, pool.id));
+  }
   const poolTeams = assignPools(teams.map(t => t.id), pools.map(p => p.id), input.seedMode)
     .map(row => ({ ...row, tournament_id: id }));
   let sequence = 1;
@@ -141,14 +154,53 @@ export function standingsForPool(bundle: TournamentBundle, poolId: string): Stan
   return records;
 }
 
-export function scoreError(scores: Array<[number, number]>, sets: 1 | 2, points: number, winByTwo: boolean): string | null {
+/** Pool overrides take precedence; the division setting is the fallback. */
+export function scoringForPool(bundle: TournamentBundle, poolId: string): ScoringRules {
+  const pool = bundle.pools.find(p => p.id === poolId);
+  if (pool?.scoring_override) {
+    return {
+      targetPoints: pool.target_points ?? bundle.tournament.target_points,
+      winByTwo: pool.win_by_two ?? bundle.tournament.win_by_two,
+      pointCap: pool.point_cap ?? null,
+    };
+  }
+  return {
+    targetPoints: bundle.tournament.target_points,
+    winByTwo: bundle.tournament.win_by_two,
+    pointCap: bundle.tournament.point_cap ?? null,
+  };
+}
+
+/** These validation rules must agree with the SQL validation function. */
+export function validateScoringRules({targetPoints, winByTwo, pointCap}: ScoringRules): void {
+  if (!Number.isInteger(targetPoints) || targetPoints < 1 || targetPoints > 100) {
+    throw new Error('Points to win must be a whole number between 1 and 100.');
+  }
+  if (pointCap !== null && (!Number.isInteger(pointCap) || pointCap <= targetPoints || pointCap > 999)) {
+    throw new Error('Point cap must be a whole number greater than the target (maximum 999).');
+  }
+  if (pointCap !== null && !winByTwo) {
+    throw new Error('Point cap only applies when win-by-two is enabled.');
+  }
+}
+
+/** A cap allows a one-point victory ONLY when the winner reaches the cap. */
+export function scoreError(
+  scores: Array<[number, number]>, sets: 1 | 2, points: number, winByTwo: boolean,
+  pointCap: number | null = null,
+): string | null {
+  try { validateScoringRules({targetPoints: points, winByTwo, pointCap}); }
+  catch (error) { return error instanceof Error ? error.message : String(error); }
   if (scores.length !== sets) return `Enter all ${sets} set scores.`;
   for (const [a, b] of scores) {
     if (!Number.isInteger(a) || !Number.isInteger(b) || a < 0 || b < 0 || a > 999 || b > 999) return 'Scores must be whole numbers between 0 and 999.';
     if (a === b) return 'Individual volleyball sets cannot end tied.';
     if (Math.max(a, b) < points) return `Winning score must be at least ${points}.`;
-    if (winByTwo && Math.abs(a - b) < 2) return 'The winning team must lead by at least two points.';
-    if (winByTwo && Math.max(a, b) > points && Math.abs(a - b) !== 2) return 'An extended set must finish when a two-point lead is reached.';
+    if (pointCap !== null && Math.max(a,b) > pointCap) return `Scores cannot exceed the ${pointCap}-point cap.`;
+    const atCap = pointCap !== null && Math.max(a,b) === pointCap;
+    if (atCap && Math.abs(a-b) > 2) return 'At the cap, the winning margin must be one or two points.';
+    if (winByTwo && !atCap && Math.abs(a - b) < 2) return 'The winning team must lead by at least two points.';
+    if (winByTwo && !atCap && Math.max(a, b) > points && Math.abs(a - b) !== 2) return 'An extended set must finish when a two-point lead is reached.';
     if (!winByTwo && Math.max(a, b) !== points) return `Without win-by-two, the winning score must equal ${points}.`;
   }
   return null;

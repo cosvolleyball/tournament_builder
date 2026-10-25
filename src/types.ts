@@ -4,10 +4,25 @@ export type DivisionFormat = 'single' | 'double';
 export interface Tournament {
   id: string; owner_id: string | null; name: string; sport: string; starts_on: string | null;
   status: TournamentStatus; pool_count: number; pool_sets: 1 | 2; target_points: number;
-  win_by_two: boolean; seed_mode: SeedMode; created_at: string;
+  win_by_two: boolean; point_cap?: number | null; seed_mode: SeedMode; created_at: string;
 }
 export interface Team { id: string; tournament_id: string; name: string; seed: number; }
-export interface Pool { id: string; tournament_id: string; label: string; sort_order: number; }
+/** A pool inherits the competition division's rules unless override is true. */
+export interface Pool {
+  id: string; tournament_id: string; label: string; sort_order: number;
+  scoring_override?: boolean;
+  target_points?: number | null;
+  win_by_two?: boolean | null;
+  point_cap?: number | null;
+}
+export interface ScoringRules {
+  targetPoints: number;
+  winByTwo: boolean;
+  pointCap: number | null;
+}
+export interface PoolScoringOverride extends ScoringRules {
+  enabled: boolean;
+}
 export interface PoolTeam { tournament_id: string; pool_id: string; team_id: string; }
 export interface Match {
   id: string; tournament_id: string; pool_id: string; team_a_id: string; team_b_id: string;
@@ -32,7 +47,8 @@ export interface PlannedBracket {
 
 export interface NewTournamentInput {
   name: string; sport: string; startsOn: string; teamNames: string[]; poolCount: number;
-  poolSets: 1 | 2; targetPoints: number; winByTwo: boolean; seedMode: SeedMode;
+  poolSets: 1 | 2; targetPoints: number; winByTwo: boolean; pointCap?: number | null;
+  poolScoring?: PoolScoringOverride[]; seedMode: SeedMode;
   playoffBrackets: PlannedBracket[];
 }
 

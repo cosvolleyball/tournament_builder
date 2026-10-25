@@ -9,7 +9,7 @@ import {
 } from 'lucide-react';
 import type { Session } from '@supabase/supabase-js';
 import type { BracketAssignments, Match, NewTournamentInput, PlannedBracket, PlayoffMatch, Pool, SetScore, Tournament, TournamentBundle } from './types';
-import { createBundle, scoreError, standingsForPool } from './engine';
+import { assignPools, createBundle, scoreError, scoringForPool, standingsForPool, validateScoringRules } from './engine';
 import { previewSingleElimination, suggestedAssignments, validateAssignments } from './playoffs';
 import { changeStatus, correctPlayoffScore, createTournament, deleteTournament, demoMode, finalizePoolAndCreatePlayoffs, getTournament, listTournaments, submitPlayoffScore, submitScore, supabase } from './repository';
 import './style.css';
@@ -20,7 +20,7 @@ const sampleTeams = Array.from({ length: 16 }, (_, i) => `Team ${i + 1}`);
 const today = new Date().toISOString().slice(0, 10);
 const blankInput: NewTournamentInput = {
   name: '', sport: 'Volleyball', startsOn: today, teamNames: [], poolCount: 4,
-  poolSets: 2, targetPoints: 21, winByTwo: true, seedMode: 'snake',
+  poolSets: 2, targetPoints: 21, winByTwo: true, pointCap: null, poolScoring: [], seedMode: 'snake',
   playoffBrackets: [{ name: 'Championship', format: 'single', bracketReset: true }],
 };
 const titleCase = (s: string) => s.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
@@ -205,7 +205,8 @@ function App() {
   };
   const handleScore = async (match: Match, pairs: Array<[number, number]>) => {
     if (!bundle) return;
-    const reason = scoreError(pairs, bundle.tournament.pool_sets, bundle.tournament.target_points, bundle.tournament.win_by_two);
+    const rules = scoringForPool(bundle, match.pool_id);
+    const reason = scoreError(pairs, bundle.tournament.pool_sets, rules.targetPoints, rules.winByTwo, rules.pointCap);
     if (reason) throw new Error(reason);
     const scores: SetScore[] = pairs.map(([score_a, score_b], i) => ({ match_id: match.id, set_number: i + 1, score_a, score_b }));
     setLoading(true);
@@ -394,6 +395,19 @@ function NewWizard({ onBack, onCreate, busy }: { onBack: () => void; onCreate: (
   const [playoffMode, setPlayoffMode] = useState<'championship' | 'multi' | 'none'>('championship');
   const [localError, setLocalError] = useState('');
   const teams = useMemo(() => teamText.split(/\r?\n/).map(v => v.trim()).filter(Boolean), [teamText]);
+  // Pool-specific settings are kept by index until the user creates the pools.
+  // Each pool's 'enabled' switch controls inheritance of division defaults.
+  const updatePoolRule = (index: number, patch: Partial<NonNullable<NewTournamentInput['poolScoring']>[number]>) => {
+    setInput(old => {
+      const updated = [...(old.poolScoring ?? [])];
+      const current = updated[index] ?? {
+        enabled: false, targetPoints: old.targetPoints,
+        winByTwo: old.winByTwo, pointCap: old.pointCap ?? null,
+      };
+      updated[index] = {...current, ...patch};
+      return {...old, poolScoring: updated};
+    });
+  };
   const update = <K extends keyof NewTournamentInput>(field: K, value: NewTournamentInput[K]) => setInput(old => ({ ...old, [field]: value }));
   const selectPlayoffMode = (mode: 'championship' | 'multi' | 'none') => {
     setPlayoffMode(mode);
@@ -416,7 +430,16 @@ function NewWizard({ onBack, onCreate, busy }: { onBack: () => void; onCreate: (
     update('playoffBrackets', [...input.playoffBrackets, {name:nextName,format:'single',bracketReset:false}]);
   };
   const usablePools = Math.min(input.poolCount, Math.max(1, Math.floor(teams.length / 2)));
-  const poolSizes = Array.from({ length: usablePools }, (_, i) => Math.floor(teams.length / usablePools) + (i < teams.length % usablePools ? 1 : 0));
+  // Match the actual snake distribution; the extra team may land in the
+  // final pool rather than always Pool A. Random mode balances counts equally.
+  const previewAssignments = assignPools(
+    Array.from({length:teams.length},(_,i)=>String(i)),
+    Array.from({length:usablePools},(_,i)=>String(i)),
+    input.seedMode, () => 0.5,
+  );
+  const poolSizes = Array.from({length:usablePools},(_,i)=>
+    previewAssignments.filter(row=>row.pool_id===String(i)).length,
+  );
   const matchCount = poolSizes.reduce((sum, n) => sum + n * (n - 1) / 2, 0);
   const submit = async (event: React.FormEvent) => {
     event.preventDefault(); setLocalError('');
@@ -424,7 +447,11 @@ function NewWizard({ onBack, onCreate, busy }: { onBack: () => void; onCreate: (
       if (teams.length < 2 || teams.length > 64) throw new Error('Please enter 2–64 teams.');
       if (new Set(teams.map(x => x.toLocaleLowerCase())).size !== teams.length) throw new Error('Team names must be unique.');
       if (input.poolCount > Math.floor(teams.length / 2)) throw new Error('Each pool needs at least two teams. Reduce the pool count.');
-      if (input.targetPoints < 1 || input.targetPoints > 100) throw new Error('Enter a target score between 1 and 100.');
+      validateScoringRules({targetPoints:input.targetPoints, winByTwo:input.winByTwo, pointCap:input.pointCap ?? null});
+      for (let i=0;i<input.poolCount;i++) {
+        const rule = input.poolScoring?.[i];
+        if (rule?.enabled) validateScoringRules(rule);
+      }
       await onCreate({ ...input, teamNames: teams });
     } catch (e) { setLocalError(e instanceof Error ? e.message : String(e)); }
   };
@@ -445,7 +472,37 @@ function NewWizard({ onBack, onCreate, busy }: { onBack: () => void; onCreate: (
       <section className="form-card"><div className="form-section-title"><span className="step-num">03</span><div><h2>Game format</h2><p>Configure pool-play scoring and future playoff divisions.</p></div></div>
         <div className="form-grid"><div className="field"><label htmlFor="sets">Sets per pool matchup</label><select id="sets" value={input.poolSets} onChange={e => update('poolSets', Number(e.target.value) as 1|2)}><option value={1}>1 fixed set</option><option value={2}>2 fixed sets (1–1 allowed)</option></select></div>
           <div className="field"><label htmlFor="points">Points to win a set</label><input id="points" type="number" min={1} max={100} value={input.targetPoints} onChange={e => update('targetPoints',Number(e.target.value))}/></div></div>
-        <label className="checkbox-row"><input type="checkbox" checked={input.winByTwo} onChange={e => update('winByTwo',e.target.checked)}/><span><strong>Win by two points</strong><small>Sets continue beyond the target until a team leads by two.</small></span></label>
+        <label className="checkbox-row"><input type="checkbox" checked={input.winByTwo} onChange={e => setInput(old=>({...old, winByTwo:e.target.checked, pointCap:e.target.checked ? old.pointCap : null}))}/><span><strong>Win by two points</strong><small>Sets continue beyond the target until a team leads by two.</small></span></label>
+        <label className="checkbox-row"><input type="checkbox" checked={input.pointCap != null} onChange={e => update('pointCap', e.target.checked ? Math.max(input.targetPoints + 1, 25) : null)}/><span><strong>Use a point cap</strong><small>At the cap, a one-point lead wins (e.g., 25–24).</small></span></label>
+        {input.pointCap != null && <div className="field"><label htmlFor="default-cap">Default point cap</label>
+          <input id="default-cap" type="number" min={input.targetPoints + 1} max={999} value={input.pointCap} onChange={e => update('pointCap', Number(e.target.value))}/></div>}
+        <div className="subheading">SCORING BY POOL</div>
+        <p className="field-hint">All pools use the defaults above unless overridden. For example, Pools A/B can play to 21 while Pool C plays to 25.</p>
+        {Array.from({length: usablePools},(_,i) => {
+          const override = input.poolScoring?.[i];
+          const enabled = override?.enabled ?? false;
+          const rules = override ?? {targetPoints:input.targetPoints, winByTwo:input.winByTwo, pointCap:input.pointCap ?? null, enabled:false};
+          return <div className="bracket-config-row" key={i}>
+            <label className="checkbox-row"><input type="checkbox" checked={enabled}
+              onChange={e => updatePoolRule(i, e.target.checked ? {
+                enabled: true, targetPoints:input.targetPoints, winByTwo:input.winByTwo, pointCap:input.pointCap ?? null,
+              } : {enabled:false})}/>
+              <span><strong>Pool {String.fromCharCode(65+i)} ({poolSizes[i] ?? 0} teams)</strong><small>{enabled ? 'Custom scoring' : 'Use default scoring'}</small></span></label>
+            {enabled && <div className="form-grid">
+              <div className="field"><label htmlFor={`pool-points-${i}`}>Points to win</label>
+                <input id={`pool-points-${i}`} type="number" min={1} max={100} value={rules.targetPoints}
+                  onChange={e => updatePoolRule(i,{targetPoints:Number(e.target.value)})}/></div>
+              <div className="field"><label htmlFor={`pool-cap-${i}`}>Point cap (optional)</label>
+                <input id={`pool-cap-${i}`} type="number" min={rules.targetPoints+1} max={999}
+                  value={rules.pointCap ?? ''} placeholder="No cap"
+                  onChange={e => updatePoolRule(i,{pointCap:e.target.value.trim()===''?null:Number(e.target.value)})}/></div>
+              <label className="checkbox-row"><input type="checkbox" checked={rules.winByTwo}
+                onChange={e => updatePoolRule(i,{winByTwo:e.target.checked, pointCap:e.target.checked ? rules.pointCap : null})}/>
+                <span><strong>Win by two</strong></span></label>
+            </div>}
+          </div>;
+        })}
+        <p className="field-hint">When pools use different point targets, compare cross-pool teams primarily by set win percentage; raw total points are not comparable.</p>
         <div className="subheading">PLAYOFF PLANNING</div>
         <div className="field">
           <label htmlFor="playoff-mode">Playoff structure</label>
@@ -821,6 +878,7 @@ function PlayoffScoreModal({ match, bundle, teamName, busy, onClose, onSave }: {
   // For corrections, show the existing scores so organizers can fix a typo
   // rather than re-entering the entire result from scratch.
   const previous = bundle.playoffScores?.find(score => score.match_id === match.id);
+  const playoffCap = bundle.tournament.point_cap ?? null;
   const [a,setA]=useState(previous ? String(previous.score_a) : '');
   const [b,setB]=useState(previous ? String(previous.score_b) : '');
   const [error,setError]=useState('');
@@ -828,7 +886,7 @@ function PlayoffScoreModal({ match, bundle, teamName, busy, onClose, onSave }: {
     event.preventDefault();setError('');
     const scoreA=a.trim()===''?NaN:Number(a);
     const scoreB=b.trim()===''?NaN:Number(b);
-    const validation=scoreError([[scoreA,scoreB]],1,bundle.tournament.target_points,bundle.tournament.win_by_two);
+    const validation=scoreError([[scoreA,scoreB]],1,bundle.tournament.target_points,bundle.tournament.win_by_two,playoffCap);
     if(validation){setError(validation);return;}
     try {await onSave(scoreA,scoreB);}catch(err){setError(err instanceof Error?err.message:String(err));}
   };
@@ -837,7 +895,7 @@ function PlayoffScoreModal({ match, bundle, teamName, busy, onClose, onSave }: {
       <button className="modal-x" type="button" onClick={onClose} aria-label="Close"><X size={19}/></button>
       <div className="modal-kicker"><Trophy size={17}/> PLAYOFF · ROUND {match.round_number}</div>
       <h2 id="playoff-score-title">{previous ? 'Correct playoff score' : 'Enter playoff result'}</h2>
-      <p className="modal-desc">One set to {bundle.tournament.target_points}{bundle.tournament.win_by_two?', win by two':''}. {previous
+      <p className="modal-desc">One set to {bundle.tournament.target_points}{bundle.tournament.win_by_two?', win by two':''}{playoffCap != null ? `, cap ${playoffCap}` : ''}. {previous
         ? 'Only organizers may correct a result. If the winner changes, the next-round team updates automatically as long as that match has not started.'
         : 'Once entered, the winner advances automatically. Players cannot overwrite submitted scores.'}</p>
       <form onSubmit={save}><div className="score-header"><strong>{teamName(match.team_a_id)}</strong><span>VS</span><strong>{teamName(match.team_b_id)}</strong></div>
@@ -868,6 +926,7 @@ function PoolPanel({ pool, bundle, isOwner, teamName, onEdit }: {
   return <div className="pool-columns"><div className="white-card"><div className="card-heading"><h2>{pool.label} standings</h2><span className="subtle-tag">Live results</span></div><div className="table-scroll"><table className="standings-table"><thead><tr><th>#</th><th>TEAM</th><th>SW</th><th>SL</th><th>WIN %</th><th>PF</th><th>PA</th></tr></thead><tbody>{standings.map(s=><tr key={s.team.id}><td><span className={`rank-number ${s.rank<=2?'top-rank':''}`}>{s.rank}</span></td><td className="team-cell">{s.team.name}</td><td>{s.wins}</td><td>{s.losses}</td><td className="pct-cell">{(s.winPct*100).toFixed(1)}%</td><td>{s.pointsFor}</td><td>{s.pointsAgainst}</td></tr>)}</tbody></table></div>
     <p className="table-caption">SW = sets won · SL = sets lost · PF/PA = points for/against. Ties: head-to-head for exactly two teams, then point ratio and normalized differential.</p></div>
     <div className="white-card"><div className="card-heading"><div><h2>Match schedule</h2><p className="section-desc">{matches.filter(m=>m.status==='completed').length} of {matches.length} complete</p></div><span className="subtle-tag">{bundle.tournament.pool_sets} set{bundle.tournament.pool_sets>1?'s':''} each</span></div>
+    <p className="table-caption">Pool rules: first to {scoringForPool(bundle,pool.id).targetPoints}{scoringForPool(bundle,pool.id).winByTwo?', win by 2':''}{scoringForPool(bundle,pool.id).pointCap != null ? `, cap ${scoringForPool(bundle,pool.id).pointCap}` : ''}.</p>
       <div className="match-list">{matches.map(m=>{const scores = bundle.scores.filter(s=>s.match_id===m.id).sort((a,b)=>a.set_number-b.set_number);return <div className="match-row" key={m.id}><div className="match-left"><span className="match-seq">R{m.round_number}</span><div className="match-teams"><strong>{teamName(m.team_a_id)} <span>vs</span> {teamName(m.team_b_id)}</strong><small>{m.status==='completed'?'Final score':'Not played'}</small></div></div>
       <div className="match-right">{scores.length?<div className="small-scores">{scores.map(s=><span key={s.set_number}>{s.score_a}–{s.score_b}</span>)}</div>:<span className="awaiting">—</span>}
         {permitted && (ownerMayEdit || m.status === 'scheduled') && <button className="score-action" onClick={()=>onEdit(m)}>{m.status==='completed'?'Edit score':isOwner?'Enter score':'Submit score'}<ChevronRight size={15}/></button>}
@@ -882,12 +941,13 @@ function ScoreModal({ match, bundle, teamName, busy, onClose, onSave }: {
   busy:boolean; onClose:()=>void; onSave:(pairs:Array<[number,number]>)=>Promise<void>;
 }) {
   const existing = bundle.scores.filter(s=>s.match_id===match.id).sort((a,b)=>a.set_number-b.set_number);
+  const rules = scoringForPool(bundle, match.pool_id);
   const [pairs,setPairs] = useState<Array<[string,string]>>(Array.from({length:bundle.tournament.pool_sets},(_,i): [string,string]=>[String(existing[i]?.score_a??''),String(existing[i]?.score_b??'')]));
   const [error,setError]=useState('');
   const save = async (event: React.FormEvent) => {
     event.preventDefault(); setError('');
     const parsed = pairs.map(([a,b])=>[a===''?NaN:Number(a),b===''?NaN:Number(b)] as [number,number]);
-    const validation = scoreError(parsed,bundle.tournament.pool_sets,bundle.tournament.target_points,bundle.tournament.win_by_two);
+    const validation = scoreError(parsed,bundle.tournament.pool_sets,rules.targetPoints,rules.winByTwo,rules.pointCap);
     if(validation){setError(validation);return;}
     try {await onSave(parsed);}catch(e){setError(e instanceof Error?e.message:String(e));}
   };
@@ -895,7 +955,7 @@ function ScoreModal({ match, bundle, teamName, busy, onClose, onSave }: {
     <div className="modal-kicker"><ClipboardList size={18}/> POOL PLAY · ROUND {match.round_number}</div><h2 id="score-dialog-title">Enter match score</h2><p className="modal-desc">Each set counts independently toward the standings. If there are two sets, a 1–1 split is allowed.</p>
     <form onSubmit={save}><div className="score-header"><strong>{teamName(match.team_a_id)}</strong><span>VS</span><strong>{teamName(match.team_b_id)}</strong></div>
       {pairs.map((row,i)=><div className="score-entry-row" key={i}><span>Set {i+1}</span><input aria-label={`Set ${i+1} ${teamName(match.team_a_id)} score`} required type="number" min={0} max={999} value={row[0]} onChange={e=>setPairs(old=>old.map((v,j)=>j===i?([e.target.value,v[1]] as [string,string]):v))}/><span>—</span><input aria-label={`Set ${i+1} ${teamName(match.team_b_id)} score`} required type="number" min={0} max={999} value={row[1]} onChange={e=>setPairs(old=>old.map((v,j)=>j===i?([v[0],e.target.value] as [string,string]):v))}/></div>)}
-      <div className="score-help">First to {bundle.tournament.target_points}{bundle.tournament.win_by_two?', win by 2':''}. Scores update all pool standings automatically. {match.status === 'scheduled' ? 'Once submitted publicly, only the organizer can correct this result.' : ''}</div>
+      <div className="score-help">First to {rules.targetPoints}{rules.winByTwo?', win by 2':''}{rules.pointCap != null ? `, capped at ${rules.pointCap}` : ''}. Scores update all pool standings automatically. {match.status === 'scheduled' ? 'Once submitted publicly, only the organizer can correct this result.' : ''}</div>
       {error && <div className="form-error" role="alert">{error}</div>}
       <div className="modal-footer"><button className="button button-outline" type="button" onClick={onClose}>Cancel</button><button className="button button-primary" type="submit" disabled={busy}><Save size={16}/> {busy?'Saving…':'Save result'}</button></div>
     </form></div></div>;

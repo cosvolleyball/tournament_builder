@@ -1,1 +1,1 @@
-{"root":["./src/engine.test.ts","./src/engine.ts","./src/main.tsx","./src/playoffs.test.ts","./src/playoffs.ts","./src/repository.ts","./src/types.ts","./vite.config.ts"],"version":"5.9.3"}
+{"root":["./src/engine.test.ts","./src/engine.ts","./src/main.tsx","./src/playoffs.test.ts","./src/playoffs.ts","./src/repository.ts","./src/scoring.test.ts","./src/types.ts","./vite.config.ts"],"version":"5.9.3"}
