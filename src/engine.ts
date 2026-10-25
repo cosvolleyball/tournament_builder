@@ -47,6 +47,13 @@ export function createBundle(input: NewTournamentInput): TournamentBundle {
   if (input.teamNames.length < 2 || input.teamNames.length > 64) throw new Error('Enter between 2 and 64 teams.');
   if (distinct.size !== input.teamNames.length || distinct.has('')) throw new Error('Team names must be nonempty and unique.');
   if (input.poolCount < 1 || input.poolCount > Math.floor(input.teamNames.length / 2)) throw new Error('Each pool must contain at least two teams.');
+  // The number and names of playoff brackets are organizer-selected.
+  // An empty list is valid for a pool-play-only tournament.
+  if (input.playoffBrackets.length > 8) throw new Error('A division supports up to eight playoff brackets.');
+  const names = input.playoffBrackets.map(bracket => bracket.name.trim().toLocaleLowerCase());
+  if (names.some(name => !name) || new Set(names).size !== names.length) {
+    throw new Error('Playoff bracket names must be nonempty and unique.');
+  }
   const id = newId();
   const tournament = {
     id, owner_id: null, name: input.name.trim(), sport: input.sport.trim() || 'Volleyball',
@@ -68,10 +75,11 @@ export function createBundle(input: NewTournamentInput): TournamentBundle {
     sequence += fixtureList.length;
     return fixtureList;
   });
-  const divisions = [
-    { id: newId(), tournament_id: id, name: 'Gold', format: input.goldFormat, bracket_reset: input.bracketReset, sort_order: 1 },
-    { id: newId(), tournament_id: id, name: 'Silver', format: input.silverFormat, bracket_reset: input.bracketReset, sort_order: 2 },
-  ];
+  const divisions = input.playoffBrackets.map((bracket, index) => ({
+    id: newId(), tournament_id: id, name: bracket.name.trim(),
+    format: bracket.format, bracket_reset: bracket.bracketReset,
+    sort_order: index + 1,
+  }));
   return { tournament, teams, pools, poolTeams, matches, scores: [], divisions };
 }
 

@@ -3,9 +3,33 @@ import { createBundle, roundRobin, scoreError, standingsForPool, assignPools } f
 import type { NewTournamentInput } from './types';
 const input: NewTournamentInput = {
   name:'Autumn Cup', sport:'Volleyball',startsOn:'2026-11-01',teamNames:Array.from({length:16},(_,i)=>`Team ${i+1}`),poolCount:4,
-  poolSets:2,targetPoints:21,winByTwo:true,seedMode:'snake',goldFormat:'double',silverFormat:'single',bracketReset:true,
+  poolSets:2,targetPoints:21,winByTwo:true,seedMode:'snake',playoffBrackets:[{name:'Championship',format:'single',bracketReset:true}],
 };
 describe('tournament engine',()=>{
+  it('creates one Championship bracket by default',()=>{
+    const b=createBundle(input);
+    expect(b.divisions).toHaveLength(1);
+    expect(b.divisions[0].name).toBe('Championship');
+  });
+  it('supports pool-play-only tournaments and custom multi-bracket plans',()=>{
+    expect(createBundle({...input,playoffBrackets:[]}).divisions).toEqual([]);
+    const multi=createBundle({...input,playoffBrackets:[
+      {name:'Gold',format:'double',bracketReset:true},
+      {name:'Silver',format:'single',bracketReset:false},
+      {name:'Bronze',format:'single',bracketReset:false},
+    ]});
+    expect(multi.divisions.map(d=>d.name)).toEqual(['Gold','Silver','Bronze']);
+    expect(multi.divisions[0].bracket_reset).toBe(true);
+  });
+  it('rejects duplicate or empty playoff bracket names',()=>{
+    expect(()=>createBundle({...input,playoffBrackets:[
+      {name:'Gold',format:'single',bracketReset:false},
+      {name:' gold ',format:'double',bracketReset:true},
+    ]})).toThrow();
+    expect(()=>createBundle({...input,playoffBrackets:[
+      {name:' ',format:'single',bracketReset:false},
+    ]})).toThrow();
+  });
   it('creates 4 evenly distributed pools and 24 unique matchups for 16 teams',()=>{
     const b=createBundle(input);
     expect(b.pools).toHaveLength(4);expect(b.matches).toHaveLength(24);

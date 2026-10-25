@@ -16,3 +16,17 @@
 .tournament-delete-area { margin-top: 36px; padding: 22px 0 4px; border-top: 1px solid #e0e6ef; display: flex; justify-content: space-between; align-items: center; gap: 16px; flex-wrap: wrap; }
 .tournament-delete-area span { color: #93a0b2; font-size: 11px; }
 .tournament-delete-area .danger-text { margin-top: 0; font-weight: 700; }
+
+
+/* v0.5: Optional, individually configured playoff brackets. */
+.bracket-config-row { border: 1px solid #e0e8f3; padding: 16px; margin: 12px 0; border-radius: 10px; background: #f9fbfe; }
+.bracket-config-row .checkbox-row { margin-top: 10px; }
+.remove-bracket { margin-top: 10px; color: #bc4858; }
+.review-status { border: 1px solid #dfe8f5; border-radius: 10px; background: #f8fbff; padding: 15px; display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap; text-align: left; font-size: 12px; margin: 22px 0; }
+.review-status span { color: #8191a7; }
+.review-standings { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 14px; text-align: left; margin: 18px 0; }
+.review-pool { border: 1px solid #e4eaf4; border-radius: 10px; padding: 13px; }
+.review-pool h3 { margin: 0 0 10px; font-size: 13px; }
+.review-standing { display: flex; justify-content: space-between; gap: 10px; padding: 8px 0; border-top: 1px solid #f0f2f6; font-size: 11px; }
+.review-standing small { color: #8191a7; text-align: right; }
+.review-format-note { color: #8191a7; font-size: 11px; line-height: 1.6; margin: 12px 0 0; }

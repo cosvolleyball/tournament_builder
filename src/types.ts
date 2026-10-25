@@ -22,8 +22,15 @@ export interface TournamentBundle {
   tournament: Tournament; teams: Team[]; pools: Pool[]; poolTeams: PoolTeam[];
   matches: Match[]; scores: SetScore[]; divisions: Division[];
 }
+/** One planned playoff bracket within a competition division (not a sport/skill division). */
+export interface PlannedBracket {
+  name: string;
+  format: DivisionFormat;
+  bracketReset: boolean;
+}
+
 export interface NewTournamentInput {
   name: string; sport: string; startsOn: string; teamNames: string[]; poolCount: number;
   poolSets: 1 | 2; targetPoints: number; winByTwo: boolean; seedMode: SeedMode;
-  goldFormat: DivisionFormat; silverFormat: DivisionFormat; bracketReset: boolean;
+  playoffBrackets: PlannedBracket[];
 }

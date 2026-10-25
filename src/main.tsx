@@ -8,7 +8,7 @@ import {
   UsersRound, Volleyball, X,
 } from 'lucide-react';
 import type { Session } from '@supabase/supabase-js';
-import type { Match, NewTournamentInput, Pool, SetScore, Tournament, TournamentBundle } from './types';
+import type { Match, NewTournamentInput, PlannedBracket, Pool, SetScore, Tournament, TournamentBundle } from './types';
 import { createBundle, scoreError, standingsForPool } from './engine';
 import { changeStatus, createTournament, deleteTournament, demoMode, getTournament, listTournaments, submitScore, supabase } from './repository';
 import './style.css';
@@ -20,7 +20,7 @@ const today = new Date().toISOString().slice(0, 10);
 const blankInput: NewTournamentInput = {
   name: '', sport: 'Volleyball', startsOn: today, teamNames: [], poolCount: 4,
   poolSets: 2, targetPoints: 21, winByTwo: true, seedMode: 'snake',
-  goldFormat: 'double', silverFormat: 'single', bracketReset: true,
+  playoffBrackets: [{ name: 'Championship', format: 'single', bracketReset: true }],
 };
 const titleCase = (s: string) => s.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
 const statusLabel = (status: string) => status === 'pool_play' ? 'Pool play active' : titleCase(status);
@@ -278,7 +278,7 @@ function App() {
         <div className="sidebar-footer">
           <div className="footer-badge"><ShieldCheck size={16}/><span>{demoMode ? 'LOCAL DEMO MODE' : 'SUPABASE CONNECTED'}</span></div>
           <p>{demoMode ? 'Data is saved only in this browser.' : 'Protected by database access policies.'}</p>
-          <div className="footer-bottom"><span>BUILD 0.2 · ALPHA</span><GitBranch size={17}/></div>
+          <div className="footer-bottom"><span>BUILD 0.5 · ALPHA</span><GitBranch size={17}/></div>
         </div>
       </aside>
       <main className="main-area">
@@ -349,7 +349,7 @@ function Dashboard({ records, onNew, onOpen, isSignedIn, signIn }: {
         <h3>Your next great tournament starts here.</h3><p>Set up teams, organize pools, and track live scores without spreadsheets.</p>
         <button className="button button-primary" onClick={isSignedIn ? onNew : signIn}>{isSignedIn ? 'Create your first tournament' : 'Sign in to get started'}<ArrowRight size={17}/></button>
       </div>}
-      <div className="feature-note"><div className="note-icon"><Sparkles size={22}/></div><div><strong>Built for volleyball. Ready for more.</strong><p>Flexible pool formats, automatic standings, and independent Gold and Silver divisions.</p></div><span className="version-pill">FOUNDATION BUILD</span></div>
+      <div className="feature-note"><div className="note-icon"><Sparkles size={22}/></div><div><strong>Built for volleyball. Ready for more.</strong><p>Flexible pool formats, automatic standings, and optional Championship or multi-bracket playoffs.</p></div><span className="version-pill">FOUNDATION BUILD</span></div>
     </div>
   );
 }
@@ -360,9 +360,30 @@ function Metric({ icon, label, value, hint }: { icon: React.ReactNode; label: st
 function NewWizard({ onBack, onCreate, busy }: { onBack: () => void; onCreate: (input: NewTournamentInput) => Promise<void>; busy: boolean }) {
   const [input, setInput] = useState<NewTournamentInput>({ ...blankInput, startsOn: randomExampleDate() });
   const [teamText, setTeamText] = useState('');
+  const [playoffMode, setPlayoffMode] = useState<'championship' | 'multi' | 'none'>('championship');
   const [localError, setLocalError] = useState('');
   const teams = useMemo(() => teamText.split(/\r?\n/).map(v => v.trim()).filter(Boolean), [teamText]);
   const update = <K extends keyof NewTournamentInput>(field: K, value: NewTournamentInput[K]) => setInput(old => ({ ...old, [field]: value }));
+  const selectPlayoffMode = (mode: 'championship' | 'multi' | 'none') => {
+    setPlayoffMode(mode);
+    // Presets are intentional starting points; the organizer can rename or
+    // change the elimination format of every planned bracket below.
+    const next: PlannedBracket[] = mode === 'championship'
+      ? [{ name: 'Championship', format: 'single', bracketReset: true }]
+      : mode === 'multi' ? [
+        { name: 'Gold', format: 'double', bracketReset: true },
+        { name: 'Silver', format: 'single', bracketReset: false },
+      ] : [];
+    update('playoffBrackets', next);
+  };
+  const editBracket = (index: number, patch: Partial<PlannedBracket>) => {
+    update('playoffBrackets', input.playoffBrackets.map((b, i) => i === index ? {...b, ...patch} : b));
+  };
+  const addBracket = () => {
+    if (input.playoffBrackets.length >= 8) return;
+    const nextName = input.playoffBrackets.length === 2 ? 'Bronze' : `Bracket ${input.playoffBrackets.length + 1}`;
+    update('playoffBrackets', [...input.playoffBrackets, {name:nextName,format:'single',bracketReset:false}]);
+  };
   const usablePools = Math.min(input.poolCount, Math.max(1, Math.floor(teams.length / 2)));
   const poolSizes = Array.from({ length: usablePools }, (_, i) => Math.floor(teams.length / usablePools) + (i < teams.length % usablePools ? 1 : 0));
   const matchCount = poolSizes.reduce((sum, n) => sum + n * (n - 1) / 2, 0);
@@ -394,11 +415,26 @@ function NewWizard({ onBack, onCreate, busy }: { onBack: () => void; onCreate: (
         <div className="form-grid"><div className="field"><label htmlFor="sets">Sets per pool matchup</label><select id="sets" value={input.poolSets} onChange={e => update('poolSets', Number(e.target.value) as 1|2)}><option value={1}>1 fixed set</option><option value={2}>2 fixed sets (1–1 allowed)</option></select></div>
           <div className="field"><label htmlFor="points">Points to win a set</label><input id="points" type="number" min={1} max={100} value={input.targetPoints} onChange={e => update('targetPoints',Number(e.target.value))}/></div></div>
         <label className="checkbox-row"><input type="checkbox" checked={input.winByTwo} onChange={e => update('winByTwo',e.target.checked)}/><span><strong>Win by two points</strong><small>Sets continue beyond the target until a team leads by two.</small></span></label>
-        <div className="subheading">PLANNED PLAYOFF DIVISIONS</div>
-        <div className="form-grid"><div className="field"><label htmlFor="gold">Gold bracket</label><select id="gold" value={input.goldFormat} onChange={e => update('goldFormat',e.target.value as 'single'|'double')}><option value="single">Single elimination</option><option value="double">Double elimination</option></select></div>
-          <div className="field"><label htmlFor="silver">Silver bracket</label><select id="silver" value={input.silverFormat} onChange={e => update('silverFormat',e.target.value as 'single'|'double')}><option value="single">Single elimination</option><option value="double">Double elimination</option></select></div></div>
-        <label className="checkbox-row"><input type="checkbox" checked={input.bracketReset} onChange={e => update('bracketReset',e.target.checked)}/><span><strong>Double-elimination bracket reset</strong><small>The undefeated finalist must lose twice (applies to double-elimination divisions).</small></span></label>
-        <div className="info-inline"><ShieldCheck size={17}/> Playoff formats are saved now. Bracket generation will be enabled in a later milestone.</div>
+        <div className="subheading">PLAYOFF PLANNING</div>
+        <div className="field">
+          <label htmlFor="playoff-mode">Playoff structure</label>
+          <select id="playoff-mode" value={playoffMode} onChange={e => selectPlayoffMode(e.target.value as 'championship'|'multi'|'none')}>
+            <option value="championship">One Championship bracket (default)</option>
+            <option value="multi">Multiple brackets (Gold / Silver / custom)</option>
+            <option value="none">No playoffs — pool standings only</option>
+          </select>
+        </div>
+        {input.playoffBrackets.map((bracket, index) => <div key={index} className="bracket-config-row">
+          <div className="form-grid">
+            <div className="field"><label htmlFor={`bracket-name-${index}`}>Bracket name</label><input id={`bracket-name-${index}`} value={bracket.name} maxLength={60} onChange={e=>editBracket(index,{name:e.target.value})}/></div>
+            <div className="field"><label htmlFor={`bracket-format-${index}`}>Elimination format</label><select id={`bracket-format-${index}`} value={bracket.format} onChange={e=>editBracket(index,{format:e.target.value as 'single'|'double'})}><option value="single">Single elimination</option><option value="double">Double elimination</option></select></div>
+          </div>
+          {bracket.format==='double' && <label className="checkbox-row"><input type="checkbox" checked={bracket.bracketReset} onChange={e=>editBracket(index,{bracketReset:e.target.checked})}/><span><strong>Bracket reset final</strong><small>Lower-bracket winner must beat undefeated finalist twice.</small></span></label>}
+          {playoffMode==='multi' && <button className="text-link remove-bracket" type="button" onClick={()=>update('playoffBrackets',input.playoffBrackets.filter((_,i)=>i!==index))}>Remove this bracket</button>}
+        </div>)}
+        {playoffMode==='multi' && input.playoffBrackets.length < 8 && <button type="button" className="button button-outline" onClick={addBracket}><Plus size={15}/> Add playoff bracket</button>}
+        {playoffMode==='none' && <p className="field-hint">No playoff bracket will be created. The tournament will finish with approved pool standings.</p>}
+        <div className="info-inline"><ShieldCheck size={17}/> Bracket settings are saved as a plan. Results review and actual bracket generation are separate organizer actions in a later milestone.</div>
       </section>
       {localError && <div className="form-error" role="alert">{localError}</div>}
       <div className="builder-buttons"><button type="button" className="button button-outline" onClick={onBack}>Cancel</button><button type="submit" className="button button-primary" disabled={busy}>{busy ? 'Creating…' : 'Create tournament'} <ArrowRight size={17}/></button></div>
@@ -406,7 +442,9 @@ function NewWizard({ onBack, onCreate, busy }: { onBack: () => void; onCreate: (
         <div className="summary-metrics"><div><strong>{teams.length}</strong><span>Teams</span></div><div><strong>{input.poolCount}</strong><span>Pools</span></div><div><strong>{matchCount}</strong><span>Pool matches</span></div><div><strong>{matchCount*input.poolSets}</strong><span>Pool sets</span></div></div>
         <div className="summary-label">POOLS AT A GLANCE</div>
         {teams.length >= 2 && input.poolCount <= teams.length / 2 ? <div className="preview-pools">{poolSizes.map((n, i) => <div key={i}><span>Pool {String.fromCharCode(65+i)}</span><strong>{n} teams</strong></div>)}</div> : <div className="preview-placeholder">Add enough teams to preview pool distribution.</div>}
-        <div className="summary-divider"/><div className="preview-formats"><span><Medal size={16}/> Gold</span><strong>{titleCase(input.goldFormat)} elim</strong></div><div className="preview-formats"><span><Medal size={16}/> Silver</span><strong>{titleCase(input.silverFormat)} elim</strong></div>
+        <div className="summary-divider"/>
+        <div className="summary-label">PLANNED PLAYOFFS</div>
+        {input.playoffBrackets.length ? input.playoffBrackets.map((b,i)=><div className="preview-formats" key={i}><span><Medal size={16}/>{b.name || 'Unnamed bracket'}</span><strong>{titleCase(b.format)} elim</strong></div>) : <p className="field-hint">Pool play only — no brackets</p>}
       </div><p className="sidebar-tip"><Sparkles size={17}/> You can create a draft first, review everything, and publish when ready.</p></aside></form>
   </div>;
 }
@@ -427,18 +465,10 @@ function TournamentPage({ bundle, isOwner, busy, onBack, onStatus, onScore, onDe
   const shareUrl = `${window.location.origin}${window.location.pathname}?t=${encodeURIComponent(t.id)}`;
   const publicReady = t.status !== 'draft';
   const firstPool = bundle.pools.some(p => p.id === activePool) ? activePool : bundle.pools[0]?.id;
-  const qualifications = useMemo(() => {
-    const gold: Array<{team: string;pool: string}> = [], silver: Array<{team:string;pool:string}> = [];
-    for (const p of bundle.pools) {
-      const ranking = standingsForPool(bundle, p.id);
-      ranking.forEach((r,i) => (i < Math.ceil(ranking.length / 2) ? gold : silver).push({team:r.team.name,pool:p.label}));
-    }
-    return { gold, silver };
-  }, [bundle]);
   return <div className="page-enter"><button className="back-button" onClick={onBack}><ArrowLeft size={16}/> All tournaments</button>
     <div className="detail-heading"><div><div className="title-overline"><span className={`status-tag ${t.status === 'draft' ? 'muted' : 'live'}`}>{statusLabel(t.status)}</span><span className="overline-separator">•</span><span>{t.sport}</span></div>
       <h1>{t.name}</h1><p><CalendarDays size={16}/>{t.starts_on ?? 'Date not set'} <span className="dot-sep">·</span> {bundle.teams.length} teams <span className="dot-sep">·</span> {bundle.pools.length} pools</p></div>
-      <div className="detail-actions">{publicReady && <button className="button button-outline" onClick={async () => {await navigator.clipboard.writeText(shareUrl);setCopied(true);window.setTimeout(()=>setCopied(false),2000);}}>{copied ? <Check size={16}/> : <Copy size={16}/>} {copied ? 'Copied' : 'Copy public link'}</button>}
+      <div className="detail-actions">{isOwner && publicReady && <button className="button button-outline" onClick={async () => {await navigator.clipboard.writeText(shareUrl);setCopied(true);window.setTimeout(()=>setCopied(false),2000);}}>{copied ? <Check size={16}/> : <Copy size={16}/>} {copied ? 'Copied' : 'Copy public link'}</button>}
         {isOwner && t.status === 'draft' && <button className="button button-primary" disabled={busy} onClick={() => onStatus('published')}><ExternalLink size={16}/> Publish tournament</button>}
         {isOwner && t.status === 'published' && <button className="button button-primary" disabled={busy} onClick={() => onStatus('pool_play')}><Flag size={16}/> Start pool play</button>}
       </div></div>
@@ -447,18 +477,20 @@ function TournamentPage({ bundle, isOwner, busy, onBack, onStatus, onScore, onDe
     <div className="tabs" role="tablist" aria-label="Tournament sections">{([['overview','Overview'],['pools','Pool play & scores'],['playoffs','Playoffs']] as const).map(([key,label]) => <button key={key} role="tab" aria-selected={tab===key} className={tab===key?'active':''} onClick={()=>setTab(key)}>{label}</button>)}</div>
     {tab === 'overview' && <div className="overview-layout"><div className="white-card"><div className="card-heading"><h2>Competition structure</h2><span className="subtle-tag">Ready to run</span></div><p className="section-desc">Your round-robin schedule has been generated automatically.</p>
       <div className="structure-rows"><div><span className="structure-icon"><UsersRound size={19}/></span><div><strong>Pool play</strong><small>{bundle.pools.length} pools · {t.pool_sets} fixed set{t.pool_sets>1?'s':''} per matchup · first to {t.target_points}{t.win_by_two ? ', win by 2' : ''}</small></div><CheckCircle2 size={19} className="ok"/></div>
-        <div><span className="structure-icon"><Medal size={19}/></span><div><strong>Gold division</strong><small>{titleCase(bundle.divisions.find(d=>d.name==='Gold')?.format??'double')} elimination · future bracket</small></div><span className="soon">PLANNED</span></div>
-        <div><span className="structure-icon"><Medal size={19}/></span><div><strong>Silver division</strong><small>{titleCase(bundle.divisions.find(d=>d.name==='Silver')?.format??'single')} elimination · future bracket</small></div><span className="soon">PLANNED</span></div></div>
+        {bundle.divisions.length ? bundle.divisions.map(d=><div key={d.id}><span className="structure-icon"><Medal size={19}/></span><div><strong>{d.name} bracket</strong><small>{titleCase(d.format)} elimination · future bracket</small></div><span className="soon">PLANNED</span></div>) : <div><span className="structure-icon"><Medal size={19}/></span><div><strong>Pool-only competition</strong><small>No playoff brackets configured.</small></div></div>}</div>
       <button className="button button-outline" onClick={() => setTab('pools')}>View pools and schedule <ArrowRight size={16}/></button></div>
       <div className="white-card"><div className="card-heading"><h2>Your pools</h2><span className="subtle-tag">{bundle.pools.length} total</span></div>
         <div className="pool-summary-list">{bundle.pools.map(p => <button key={p.id} onClick={() => {setActivePool(p.id);setTab('pools');}}><span className="pool-letter">{p.label.slice(-1)}</span><div><strong>{p.label}</strong><small>{bundle.poolTeams.filter(x=>x.pool_id===p.id).length} teams · {bundle.matches.filter(x=>x.pool_id===p.id).length} matches</small></div><ChevronRight size={17}/></button>)}</div>
       </div></div>}
     {tab === 'pools' && <div className="pool-play-area"><div className="pool-switcher">{bundle.pools.map(pool => <button key={pool.id} className={firstPool===pool.id?'active':''} onClick={()=>setActivePool(pool.id)}>{pool.label}</button>)}</div>
       {bundle.pools.filter(p=>p.id===firstPool).map(pool => <PoolPanel key={pool.id} pool={pool} bundle={bundle} isOwner={isOwner} teamName={teamName} onEdit={setEditingMatch}/>)}</div>}
-    {tab === 'playoffs' && <div className="white-card playoff-preview"><div className="playoff-icon"><Swords size={26}/></div><span className="eyebrow">UPCOMING MILESTONE</span><h2>Playoff brackets</h2><p>Gold and Silver configurations are saved. The elimination bracket engine, qualification approval, and automatic advancement will be added in the next development milestone.</p>
-      <div className="division-preview">{bundle.divisions.map(d=><div key={d.id}><div className="division-preview-heading"><Medal size={18}/><strong>{d.name} division</strong><span className="format-pill">{d.format === 'double'?'Double elimination':'Single elimination'}</span></div>
-        <div className="candidate-list">{(d.name==='Gold'?qualifications.gold:qualifications.silver).map((c,i)=><div key={i}><span>{c.team}</span><small>{c.pool}</small></div>)}</div></div>)}</div>
-      <div className="info-inline center"><ShieldCheck size={17}/> Provisional placements only. No official playoff seeds or brackets have been generated.</div>
+    {tab === 'playoffs' && <div className="white-card playoff-preview"><div className="playoff-icon"><Swords size={26}/></div><span className="eyebrow">ORGANIZER REVIEW</span><h2>{bundle.divisions.length ? 'Pool results & playoff planning' : 'Pool results review'}</h2>
+      <p>Review all set scores and pool standings before approving qualification or ending pool play. No official playoff seeds have been assigned.</p>
+      <div className="review-status"><strong>{complete} of {scheduled} pool matches recorded</strong><span>{complete===scheduled ? 'All results received — ready for organizer review' : `${scheduled-complete} matches are still awaiting scores`}</span></div>
+      <div className="review-standings">{bundle.pools.map(pool=><div className="review-pool" key={pool.id}><h3>{pool.label}</h3>{standingsForPool(bundle,pool.id).map(s=><div className="review-standing" key={s.team.id}><span>{s.rank}. {s.team.name}</span><small>{s.wins}–{s.losses} sets · {(s.winPct*100).toFixed(1)}%</small></div>)}</div>)}</div>
+      {bundle.divisions.length ? <div className="division-preview">{bundle.divisions.map(d=><div key={d.id}><div className="division-preview-heading"><Medal size={18}/><strong>{d.name} bracket</strong><span className="format-pill">{d.format === 'double'?'Double elimination':'Single elimination'}</span></div><p className="review-format-note">Qualification and seeding will be approved by the organizer before this bracket is generated.</p></div>)}</div> : <p className="review-format-note">This competition has no planned playoff brackets. Final standings will determine the result.</p>}
+      {isOwner ? <div className="info-inline center"><ShieldCheck size={17}/> Check scores in Pool play &amp; scores; the Finalize Pool Play action will be enabled alongside the bracket engine. Scores remain editable until then.</div>
+      : <div className="info-inline center"><ShieldCheck size={17}/> Pool standings are provisional until the organizer confirms the results.</div>}
     </div>}
     {isOwner && tab === 'overview' && <div className="tournament-delete-area">
       <span>Remove this tournament and all its results permanently.</span>
