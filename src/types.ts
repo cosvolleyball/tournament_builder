@@ -36,7 +36,7 @@ export interface Division {
 export interface TournamentBundle {
   tournament: Tournament; teams: Team[]; pools: Pool[]; poolTeams: PoolTeam[];
   matches: Match[]; scores: SetScore[]; divisions: Division[];
-  playoffMatches?: PlayoffMatch[]; playoffScores?: SetScore[];
+  playoffMatches?: PlayoffMatch[]; playoffScores?: SetScore[]; roundRules?: PlayoffRoundRule[];
 }
 /** One planned playoff bracket within a competition division (not a sport/skill division). */
 export interface PlannedBracket {
@@ -66,3 +66,17 @@ export interface PlayoffMatch {
 }
 /** A completed single-set match's score uses the existing set_scores table. */
 export type BracketAssignments = Record<string, string[]>;
+
+/** Persisted scoring settings for a single round of one playoff bracket. */
+export interface PlayoffRoundRule {
+  bracket_id: string;
+  round_number: number;
+  best_of: 1 | 3 | 5;
+  target_points: number;
+  win_by_two: boolean;
+  point_cap: number | null;
+  decider_target_points: number;
+  decider_win_by_two: boolean;
+  decider_point_cap: number | null;
+}
+export type RoundRulesByBracket = Record<string, PlayoffRoundRule[]>;

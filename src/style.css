@@ -220,3 +220,16 @@
   .bracket-scroll { padding: 8px 6px 15px; }
   .bracket-column h3 { font-size: 13px; }
 }
+
+/* v0.7c: compact, readable per-round match format settings (organizer only). */
+.round-scoring-settings { border-top: 1px solid #dce4ed; margin-top: 20px; padding-top: 16px; }
+.round-scoring-settings h3 { font-size: 1rem; margin: 0 0 8px; }
+.round-scoring-row { padding: 12px; margin: 12px 0; border: 1px solid #cdd9e9; border-radius: 10px; background: #f8fafc; }
+.round-scoring-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 10px; }
+.round-scoring-head select { min-width: 128px; }
+.round-scoring-fields { display: flex; flex-wrap: wrap; align-items: end; gap: 12px; }
+.round-scoring-fields label { display: flex; flex-direction: column; gap: 4px; font-size: .84rem; font-weight: 600; }
+.round-scoring-fields label input[type='number'] { width: 95px; }
+.round-scoring-fields .compact-checkbox { flex-direction: row; align-items: center; gap: 6px; min-height: 38px; }
+.round-scoring-decider { border-top: 1px dashed #bbc9dc; padding-top: 10px; margin-top: 10px; }
+@media(max-width: 630px) { .round-scoring-head { flex-wrap: wrap; } .round-scoring-fields { gap: 8px; } }

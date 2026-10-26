@@ -12,7 +12,7 @@
 import { createClient, type SupabaseClient } from '@supabase/supabase-js';
 import type {
   TournamentBundle, Tournament, TournamentStatus, SetScore,
-  Team, Pool, PoolTeam, Match, Division, BracketAssignments, PlayoffMatch,
+  Team, Pool, PoolTeam, Match, Division, BracketAssignments, PlayoffMatch, PlayoffRoundRule, RoundRulesByBracket,
 } from './types';
 
 const supabaseUrl = import.meta.env.VITE_SUPABASE_URL?.trim();
@@ -94,14 +94,15 @@ export async function getTournament(id: string): Promise<TournamentBundle> {
   const chosen = compDivisions?.[0];
   if (!chosen) throw new Error('This tournament has no competition division yet.');
 
-  const [teamsResult, poolsResult, poolTeamsResult, matchesResult, bracketsResult] = await Promise.all([
+  const [teamsResult, poolsResult, poolTeamsResult, matchesResult, bracketsResult, rulesResult] = await Promise.all([
     db.from('teams').select('*').eq('division_id', chosen.id).order('seed'),
     db.from('pools').select('*').eq('division_id', chosen.id).order('sort_order'),
     db.from('pool_teams').select('*').eq('division_id', chosen.id),
     db.from('matches').select('*').eq('division_id', chosen.id).eq('stage', 'pool').order('sequence'),
     db.from('playoff_brackets').select('*').eq('division_id', chosen.id).order('sort_order'),
+    db.from('playoff_round_rules').select('*').eq('division_id', chosen.id).order('round_number'),
   ]);
-  for (const result of [teamsResult, poolsResult, poolTeamsResult, matchesResult, bracketsResult]) check(result.error);
+  for (const result of [teamsResult, poolsResult, poolTeamsResult, matchesResult, bracketsResult, rulesResult]) check(result.error);
   const rawMatches = matchesResult.data ?? [];
   // The `set_scores` table does not have tournament_id; filter by these match IDs.
   const matchIds = rawMatches.map(m => m.id);
@@ -157,9 +158,16 @@ export async function getTournament(id: string): Promise<TournamentBundle> {
     match_id: row.match_id, set_number: row.set_number,
     score_a: row.score_a, score_b: row.score_b,
   }));
+  const roundRules: PlayoffRoundRule[] = (rulesResult.data ?? []).map(row => ({
+    bracket_id:row.bracket_id, round_number:row.round_number,
+    best_of:row.best_of as 1|3|5,
+    target_points:row.target_points, win_by_two:row.win_by_two,point_cap:row.point_cap,
+    decider_target_points:row.decider_target_points,
+    decider_win_by_two:row.decider_win_by_two, decider_point_cap:row.decider_point_cap,
+  }));
   return {
     tournament: asUiTournament(tournament, chosen), teams, pools,
-    poolTeams, matches, scores, divisions, playoffMatches, playoffScores,
+    poolTeams, matches, scores, divisions, playoffMatches, playoffScores,roundRules,
   };
 }
 
@@ -300,53 +308,39 @@ export async function deleteTournament(id: string): Promise<void> {
 export async function finalizePoolAndCreatePlayoffs(
   bundle: TournamentBundle,
   assignments: BracketAssignments,
+  roundRules: RoundRulesByBracket,
 ): Promise<void> {
   if (demoMode) {
     // Local demo supports preview only, not a fake persisted playoff engine.
     throw new Error('Bracket finalization requires the connected Supabase project.');
   }
-  const { error } = await requireDb().rpc('finalize_and_generate_single_elimination', {
+  const { error } = await requireDb().rpc('finalize_with_playoff_round_rules', {
     p_tournament_id: bundle.tournament.id,
     p_assignments: assignments,
+    p_round_rules: roundRules,
   });
   check(error);
 }
 
 /**
- * Public first-submission score entry for ONE playoff set. Server-side SQL
- * locks the match, stores the score, and advances the winner in one transaction.
+ * Score an entire playoff series atomically. Public visitors can submit only
+ * an unfinished match. Supabase validates per-round rules and advances winner.
  */
-export async function submitPlayoffScore(
-  matchId: string,
-  scoreA: number,
-  scoreB: number,
-): Promise<void> {
+export async function submitPlayoffScore(matchId:string,scores:SetScore[]):Promise<void> {
   if (demoMode) throw new Error('Playoff scoring requires Supabase.');
-  const { error } = await requireDb().rpc('submit_public_playoff_result', {
-    p_match_id: matchId, p_score_a: scoreA, p_score_b: scoreB,
+  const {error}=await requireDb().rpc('submit_public_playoff_series',{
+    p_match_id:matchId,
+    p_scores:scores.map(s=>({set_number:s.set_number,score_a:s.score_a,score_b:s.score_b})),
   });
   check(error);
 }
 
-
-/**
- * Organizer-only correction for an already completed, single-set playoff match.
- * Database RPC verifies tournament ownership and updates the next-round team
- * slot atomically when a different team should have advanced.
- *
- * Public visitors must continue using submitPlayoffScore, which does NOT permit
- * overwriting a completed result.
- */
-export async function correctPlayoffScore(
-  matchId: string,
-  scoreA: number,
-  scoreB: number,
-): Promise<void> {
-  if (demoMode) throw new Error('Playoff score corrections require Supabase.');
-  const { error } = await requireDb().rpc('correct_single_elimination_result', {
-    p_match_id: matchId,
-    p_score_a: scoreA,
-    p_score_b: scoreB,
+/** Only an authenticated tournament owner can correct completed playoff sets. */
+export async function correctPlayoffScore(matchId:string,scores:SetScore[]):Promise<void> {
+  if (demoMode) throw new Error('Playoff corrections require Supabase.');
+  const {error}=await requireDb().rpc('correct_playoff_series',{
+    p_match_id:matchId,
+    p_scores:scores.map(s=>({set_number:s.set_number,score_a:s.score_a,score_b:s.score_b})),
   });
   check(error);
 }

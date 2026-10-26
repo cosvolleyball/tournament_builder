@@ -8,9 +8,10 @@ import {
   UsersRound, Volleyball, X,
 } from 'lucide-react';
 import type { Session } from '@supabase/supabase-js';
-import type { BracketAssignments, Match, NewTournamentInput, PlannedBracket, PlayoffMatch, Pool, SetScore, Tournament, TournamentBundle } from './types';
+import type { BracketAssignments, Match, NewTournamentInput, PlannedBracket, PlayoffMatch, PlayoffRoundRule, RoundRulesByBracket, Pool, SetScore, Tournament, TournamentBundle } from './types';
 import { assignPools, createBundle, scoreError, scoringForPool, standingsForPool, validateScoringRules } from './engine';
 import { previewSingleElimination, suggestedAssignments, validateAssignments } from './playoffs';
+import { effectiveRoundRule, evaluateSeries, roundRuleError, scorePairs } from './playoffFormats';
 import { changeStatus, correctPlayoffScore, createTournament, deleteTournament, demoMode, finalizePoolAndCreatePlayoffs, getTournament, listTournaments, submitPlayoffScore, submitScore, supabase } from './repository';
 import './style.css';
 
@@ -219,11 +220,11 @@ function App() {
   // The alpha build uses the pre-created Supabase email/password account.
   // Public signups are disabled at the Supabase project level.
   /** Organizer review is authoritative only after Supabase validates every pool result and seed. */
-  const handleFinalizePlayoffs = async (assignments: BracketAssignments) => {
+  const handleFinalizePlayoffs = async (assignments: BracketAssignments, roundRules: RoundRulesByBracket) => {
     if (!bundle || !owner) throw new Error('Only an organizer may finalize pool play.');
     const id = bundle.tournament.id;
     await perform(async () => {
-      await finalizePoolAndCreatePlayoffs(bundle, assignments);
+      await finalizePoolAndCreatePlayoffs(bundle, assignments, roundRules);
       await reload(id);
     }, bundle.divisions.length ? 'Pool play finalized. Playoff brackets generated.' : 'Final standings approved.');
   };
@@ -231,16 +232,16 @@ function App() {
    * New playoff scores are open to players without sign-in; corrections of
    * completed matches use a separate, owner-only RPC. Both refresh the bracket.
    */
-  const handlePlayoffScore = async (match: PlayoffMatch, scoreA: number, scoreB: number) => {
+  const handlePlayoffScore = async (match: PlayoffMatch, scores: SetScore[]) => {
     if (!bundle) return;
     const id = bundle.tournament.id;
     setLoading(true);
     try {
       if (match.status === 'completed') {
         if (!owner) throw new Error('Only an organizer can correct completed playoff scores.');
-        await correctPlayoffScore(match.id, scoreA, scoreB);
+        await correctPlayoffScore(match.id, scores);
       } else {
-        await submitPlayoffScore(match.id, scoreA, scoreB);
+        await submitPlayoffScore(match.id, scores);
       }
       await reload(id);
       setToast(match.status === 'completed'
@@ -541,8 +542,8 @@ function TournamentPage({ bundle, isOwner, busy, onBack, onStatus, onScore, onDe
   bundle: TournamentBundle; isOwner: boolean; busy: boolean; onBack: () => void;
   onStatus: (next: 'published'|'pool_play') => Promise<void>; onScore: (match: Match, scores: Array<[number,number]>) => Promise<void>;
   onDelete: () => Promise<void>;
-  onFinalize: (assignments: BracketAssignments) => Promise<void>;
-  onPlayoffScore: (match: PlayoffMatch, scoreA: number, scoreB: number) => Promise<void>;
+  onFinalize: (assignments: BracketAssignments, rules: RoundRulesByBracket) => Promise<void>;
+  onPlayoffScore: (match: PlayoffMatch, scores: SetScore[]) => Promise<void>;
 }) {
   const [tab, setTab] = useState<DetailTab>('overview');
   const [activePool, setActivePool] = useState(bundle.pools[0]?.id ?? '');
@@ -675,11 +676,25 @@ function EliminationBracket({ label, rounds }: { label: string; rounds: DiagramR
  */
 function PlayoffPanel({ bundle, isOwner, busy, onFinalize, onPlayoffScore }: {
   bundle: TournamentBundle; isOwner: boolean; busy: boolean;
-  onFinalize: (assignments: BracketAssignments) => Promise<void>;
-  onPlayoffScore: (match: PlayoffMatch, a: number, b: number) => Promise<void>;
+  onFinalize: (assignments: BracketAssignments, rules: RoundRulesByBracket) => Promise<void>;
+  onPlayoffScore: (match: PlayoffMatch, scores: SetScore[]) => Promise<void>;
 }) {
   const [assignments, setAssignments] = useState<BracketAssignments>(() => suggestedAssignments(bundle));
   const [confirmed, setConfirmed] = useState(false);
+  const [editedRoundRules, setEditedRoundRules] = useState<Record<string,Record<number,PlayoffRoundRule>>>({});
+  const getRule = (bracketId:string, round:number): PlayoffRoundRule => editedRoundRules[bracketId]?.[round]
+    ?? effectiveRoundRule(bundle,bracketId,round);
+  const changeRoundRule = (bracketId:string, round:number, patch:Partial<PlayoffRoundRule>) => {
+    setConfirmed(false);
+    setEditedRoundRules(old=>({
+      ...old,
+      [bracketId]: {...old[bracketId], [round]: {...(old[bracketId]?.[round] ?? getRule(bracketId,round)),...patch}},
+    }));
+  };
+  const buildRules = (): RoundRulesByBracket => Object.fromEntries(
+    bundle.divisions.map(bracket=>[bracket.id,Array.from({length:Math.ceil(Math.log2((assignments[bracket.id]??[]).length))},
+      (_,i)=>getRule(bracket.id,i+1))]),
+  );
   const [activeMatch, setActiveMatch] = useState<PlayoffMatch | null>(null);
   const [saveError, setSaveError] = useState('');
   const t = bundle.tournament;
@@ -691,8 +706,9 @@ function PlayoffPanel({ bundle, isOwner, busy, onFinalize, onPlayoffScore }: {
     : 'TBD';
   const brackets = [...bundle.divisions].sort((a,b)=>a.sort_order-b.sort_order);
   const assignmentError = validateAssignments(bundle, assignments);
+  const scoringError = Object.values(buildRules()).flat().map(roundRuleError).find(Boolean);
   const canFinalize = isOwner && !demoMode && t.status === 'pool_play'
-    && allComplete && !assignmentError && confirmed && !busy;
+    && allComplete && !assignmentError && !scoringError && confirmed && !busy;
 
   const moveTeam = (teamId: string, fromId: string, toId: string) => {
     if (fromId === toId) return;
@@ -720,7 +736,7 @@ function PlayoffPanel({ bundle, isOwner, busy, onFinalize, onPlayoffScore }: {
       ? `Finalize all pool results and generate ${brackets.length} playoff bracket(s)?\n\nPool scores will lock. Playoff seeding cannot be changed once matches begin.`
       : 'Approve final pool standings and complete this pool-only tournament? Pool scores will lock.';
     if (!window.confirm(message)) return;
-    try { await onFinalize(assignments); }
+    try { await onFinalize(assignments,buildRules()); }
     catch (error) { setSaveError(error instanceof Error ? error.message : String(error)); }
   };
 
@@ -772,6 +788,38 @@ function PlayoffPanel({ bundle, isOwner, busy, onFinalize, onPlayoffScore }: {
             </div>
           </div>)}
         </div>}
+        {isOwner && !running && bracket.format==='single' && ids.length>=2 && <div className="round-scoring-settings">
+          <h3>Scoring by playoff round</h3>
+          <p className="review-format-note">Each round can use one set, best of three, or best of five. Deciding-set rules apply only to the last possible set.</p>
+          {Array.from({length:Math.ceil(Math.log2(ids.length))},(_,i)=>i+1).map(round=>{
+            const rule=getRule(bracket.id,round);
+            const totalRounds=Math.ceil(Math.log2(ids.length));
+            return <div className="round-scoring-row" key={round}>
+              <div className="round-scoring-head"><strong>{round===totalRounds?'Final':round===totalRounds-1?'Semifinals':`Round ${round}`}</strong>
+                <select aria-label={`${bracket.name} round ${round} match format`} value={rule.best_of}
+                  onChange={e=>changeRoundRule(bracket.id,round,{best_of:Number(e.target.value) as 1|3|5})}>
+                  <option value={1}>Single set</option><option value={3}>Best of 3</option><option value={5}>Best of 5</option>
+                </select></div>
+              <div className="round-scoring-fields">
+                <label>Points / set<input type="number" min="1" max="100" value={rule.target_points}
+                  onChange={e=>changeRoundRule(bracket.id,round,{target_points:Number(e.target.value)})}/></label>
+                <label>Point cap (optional)<input type="number" min="1" max="999" placeholder="No cap" value={rule.point_cap??''}
+                  onChange={e=>changeRoundRule(bracket.id,round,{point_cap:e.target.value===''?null:Number(e.target.value)})}/></label>
+                <label className="compact-checkbox"><input type="checkbox" checked={rule.win_by_two}
+                  onChange={e=>changeRoundRule(bracket.id,round,{win_by_two:e.target.checked,point_cap:e.target.checked?rule.point_cap:null})}/> Win by 2</label>
+              </div>
+              {rule.best_of>1 && <div className="round-scoring-fields round-scoring-decider">
+                <label>Deciding set to<input type="number" min="1" max="100" value={rule.decider_target_points}
+                  onChange={e=>changeRoundRule(bracket.id,round,{decider_target_points:Number(e.target.value)})}/></label>
+                <label>Deciding cap<input type="number" min="1" max="999" placeholder="No cap" value={rule.decider_point_cap??''}
+                  onChange={e=>changeRoundRule(bracket.id,round,{decider_point_cap:e.target.value===''?null:Number(e.target.value)})}/></label>
+                <label className="compact-checkbox"><input type="checkbox" checked={rule.decider_win_by_two}
+                  onChange={e=>changeRoundRule(bracket.id,round,{decider_win_by_two:e.target.checked,decider_point_cap:e.target.checked?rule.decider_point_cap:null})}/> Decider win by 2</label>
+              </div>}
+              {roundRuleError(rule) && <p className="form-error">{roundRuleError(rule)}</p>}
+            </div>;
+          })}
+        </div>}
         {bracket.format === 'single' && !!preview.length && <EliminationBracket
           label={`${bracket.name} bracket preview`}
           rounds={Array.from(new Set(preview.map(match => match.round))).map(round => ({
@@ -803,6 +851,7 @@ function PlayoffPanel({ bundle, isOwner, busy, onFinalize, onPlayoffScore }: {
       <h2>Approve pool results</h2>
       <p className="review-format-note">Check all scores and final standings first. Pool results will be locked after finalization. Public visitors cannot generate brackets.</p>
       {assignmentError && <p className="form-error" role="alert">{assignmentError}</p>}
+      {scoringError && <p className="form-error" role="alert">Playoff scoring: {scoringError}</p>}
       {!allComplete && <p className="form-error">{bundle.matches.length - complete} pool matches still need a result.</p>}
       {demoMode && <p className="review-format-note">Live bracket creation requires Supabase. Local demo can preview the seed assignments.</p>}
       <label className="checkbox-row"><input type="checkbox" checked={confirmed} onChange={e=>setConfirmed(e.target.checked)}/>
@@ -817,9 +866,11 @@ function PlayoffPanel({ bundle, isOwner, busy, onFinalize, onPlayoffScore }: {
       const matches = (bundle.playoffMatches ?? []).filter(m=>m.bracket_id===bracket.id);
       const maxRound = Math.max(0,...matches.map(m=>m.round_number));
       const championMatch = matches.find(m=>m.round_number===maxRound);
-      const championScore = (bundle.playoffScores??[]).find(s=>s.match_id===championMatch?.id);
-      const champion = championMatch && championMatch.status==='completed' && championScore
-        ? teamName(championScore.score_a>championScore.score_b?championMatch.team_a_id:championMatch.team_b_id)
+      const championScores = (bundle.playoffScores??[]).filter(s=>s.match_id===championMatch?.id);
+      const championWinsA=championScores.filter(s=>s.score_a>s.score_b).length;
+      const championWinsB=championScores.filter(s=>s.score_b>s.score_a).length;
+      const champion = championMatch && championMatch.status==='completed' && championScores.length
+        ? teamName(championWinsA>championWinsB?championMatch.team_a_id:championMatch.team_b_id)
         : null;
       return <div className="white-card playoff-review-card" key={bracket.id}>
         <div className="card-heading"><div><h2>{bracket.name} bracket</h2>
@@ -830,11 +881,14 @@ function PlayoffPanel({ bundle, isOwner, busy, onFinalize, onPlayoffScore }: {
           rounds={Array.from(new Set(matches.map(match => match.round_number))).map(round => ({
             number: round,
             cards: matches.filter(match => match.round_number === round).map(match => {
-              const score = (bundle.playoffScores ?? []).find(result => result.match_id === match.id);
+              const allScores = (bundle.playoffScores ?? []).filter(result => result.match_id === match.id);
+              const winsA=allScores.filter(score=>score.score_a>score.score_b).length;
+              const winsB=allScores.filter(score=>score.score_b>score.score_a).length;
+              const rule=effectiveRoundRule(bundle,bracket.id,round);
               const ready = match.status === 'scheduled' && !!match.team_a_id && !!match.team_b_id
                 && t.status === 'playoffs';
-              const winningTeamA = !!score && score.score_a > score.score_b;
-              const winningTeamB = !!score && score.score_b > score.score_a;
+              const winningTeamA = match.status==='completed' && winsA>winsB;
+              const winningTeamB = match.status==='completed' && winsB>winsA;
               return {
                 id: match.id,
                 state: match.status === 'completed' ? 'completed' as const
@@ -842,16 +896,18 @@ function PlayoffPanel({ bundle, isOwner, busy, onFinalize, onPlayoffScore }: {
                 content: <>
                   <div className={`bracket-team ${winningTeamA ? 'bracket-team--winner' : ''}`}>
                     <span title={teamName(match.team_a_id)}>{teamName(match.team_a_id)}</span>
-                    <strong>{score?.score_a ?? ''}</strong>
+                    <strong>{allScores.length ? winsA : ''}</strong>
                   </div>
                   <div className={`bracket-team ${winningTeamB ? 'bracket-team--winner' : ''}`}>
                     <span title={teamName(match.team_b_id)}>{match.status === 'bye' && !match.team_b_id
                       ? 'BYE' : teamName(match.team_b_id)}</span>
-                    <strong>{score?.score_b ?? ''}</strong>
+                    <strong>{allScores.length ? winsB : ''}</strong>
                   </div>
                   <small className="bracket-match-status">{match.status === 'bye'
                     ? 'Automatic advance' : match.status === 'completed'
-                      ? 'Final result' : ready ? 'Ready for score' : 'Awaiting previous winners'}</small>
+                      ? `${rule.best_of===1?'Single set':`Best of ${rule.best_of}`} · ${allScores.map(s=>`${s.score_a}–${s.score_b}`).join(' / ')}`
+                      : ready ? `${rule.best_of===1?'Single set':`Best of ${rule.best_of}`} · Ready for score`
+                      : 'Awaiting previous winners'}</small>
                   {(ready || (isOwner && match.status === 'completed')) &&
                     <button className="score-action" type="button" disabled={busy}
                       onClick={() => setActiveMatch(match)}>
@@ -866,47 +922,63 @@ function PlayoffPanel({ bundle, isOwner, busy, onFinalize, onPlayoffScore }: {
     })}
     {activeMatch && <PlayoffScoreModal match={activeMatch} bundle={bundle} teamName={teamName}
       busy={busy} onClose={()=>setActiveMatch(null)}
-      onSave={async (a,b)=>{await onPlayoffScore(activeMatch,a,b);setActiveMatch(null);}}/>}
+      onSave={async pairs=>{
+        await onPlayoffScore(activeMatch,pairs.map(([score_a,score_b],i)=>({
+          match_id:activeMatch.id,set_number:i+1,score_a,score_b,
+        })));
+        setActiveMatch(null);
+      }}/>}
   </div>;
 }
 
-/** Account-free playoff result form. One set per playoff match in v0.6. */
+/** No player account is required to enter a completed playoff match series. */
 function PlayoffScoreModal({ match, bundle, teamName, busy, onClose, onSave }: {
-  match: PlayoffMatch; bundle: TournamentBundle; teamName: (id:string|null)=>string;
-  busy:boolean; onClose:()=>void; onSave:(a:number,b:number)=>Promise<void>;
+  match: PlayoffMatch; bundle: TournamentBundle; teamName:(id:string|null)=>string;
+  busy:boolean; onClose:()=>void; onSave:(pairs:Array<[number,number]>)=>Promise<void>;
 }) {
-  // For corrections, show the existing scores so organizers can fix a typo
-  // rather than re-entering the entire result from scratch.
-  const previous = bundle.playoffScores?.find(score => score.match_id === match.id);
-  const playoffCap = bundle.tournament.point_cap ?? null;
-  const [a,setA]=useState(previous ? String(previous.score_a) : '');
-  const [b,setB]=useState(previous ? String(previous.score_b) : '');
+  const rule=effectiveRoundRule(bundle,match.bracket_id,match.round_number);
+  const previous=scorePairs((bundle.playoffScores??[]).filter(s=>s.match_id===match.id));
+  const [fields,setFields]=useState<Array<[string,string]>>(()=>
+    Array.from({length:rule.best_of},(_,i):[string,string]=> previous[i]
+      ? [String(previous[i][0]),String(previous[i][1])] : ['','']),
+  );
   const [error,setError]=useState('');
+  const needed=Math.floor(rule.best_of/2)+1;
   const save=async (event:React.FormEvent)=>{
     event.preventDefault();setError('');
-    const scoreA=a.trim()===''?NaN:Number(a);
-    const scoreB=b.trim()===''?NaN:Number(b);
-    const validation=scoreError([[scoreA,scoreB]],1,bundle.tournament.target_points,bundle.tournament.win_by_two,playoffCap);
-    if(validation){setError(validation);return;}
-    try {await onSave(scoreA,scoreB);}catch(err){setError(err instanceof Error?err.message:String(err));}
+    const pairs:Array<[number,number]>=[];
+    let gap=false;
+    for (const [a,b] of fields) {
+      if (!a.trim() && !b.trim()) {gap=true;continue;}
+      if (!a.trim() || !b.trim() || gap) {setError('Enter both scores consecutively, without skipped sets.');return;}
+      pairs.push([Number(a),Number(b)]);
+    }
+    const {error:validation}=evaluateSeries(pairs,rule);
+    if (validation) {setError(validation);return;}
+    try {await onSave(pairs);}catch(err){setError(err instanceof Error?err.message:String(err));}
   };
   return <div className="modal-backdrop" onMouseDown={e=>{if(e.target===e.currentTarget)onClose();}}>
     <div className="modal" role="dialog" aria-modal="true" aria-labelledby="playoff-score-title">
       <button className="modal-x" type="button" onClick={onClose} aria-label="Close"><X size={19}/></button>
       <div className="modal-kicker"><Trophy size={17}/> PLAYOFF · ROUND {match.round_number}</div>
-      <h2 id="playoff-score-title">{previous ? 'Correct playoff score' : 'Enter playoff result'}</h2>
-      <p className="modal-desc">One set to {bundle.tournament.target_points}{bundle.tournament.win_by_two?', win by two':''}{playoffCap != null ? `, cap ${playoffCap}` : ''}. {previous
-        ? 'Only organizers may correct a result. If the winner changes, the next-round team updates automatically as long as that match has not started.'
-        : 'Once entered, the winner advances automatically. Players cannot overwrite submitted scores.'}</p>
-      <form onSubmit={save}><div className="score-header"><strong>{teamName(match.team_a_id)}</strong><span>VS</span><strong>{teamName(match.team_b_id)}</strong></div>
-        <div className="score-entry-row"><span>Set 1</span>
-          <input aria-label="First team score" required type="number" min={0} max={999} value={a} onChange={e=>setA(e.target.value)}/>
+      <h2 id="playoff-score-title">{previous.length?'Correct playoff result':'Enter playoff result'}</h2>
+      <p className="modal-desc">{rule.best_of===1?'Single set':`Best of ${rule.best_of}`} — first to {needed} set win{needed===1?'':'s'}.
+        Regular sets to {rule.target_points}{rule.win_by_two?', win by 2':''}{rule.point_cap!=null?`, cap ${rule.point_cap}`:''}.
+        {rule.best_of>1&&` Deciding set to ${rule.decider_target_points}${rule.decider_win_by_two?', win by 2':''}${rule.decider_point_cap!=null?`, cap ${rule.decider_point_cap}`:''}.`}
+        {previous.length?' Only organizers may correct an existing result.':' Submit all played sets at once; unused sets remain blank.'}</p>
+      <form onSubmit={save}>
+        <div className="score-header"><strong>{teamName(match.team_a_id)}</strong><span>VS</span><strong>{teamName(match.team_b_id)}</strong></div>
+        {fields.map(([a,b],i)=><div className="score-entry-row" key={i}>
+          <span>Set {i+1}{i===rule.best_of-1&&rule.best_of>1?' (decider)':''}</span>
+          <input aria-label={`Set ${i+1} first team score`} type="number" min={0} max={999} value={a}
+            onChange={e=>setFields(old=>old.map((v,j)=>j===i?([e.target.value,v[1]] as [string,string]):v))}/>
           <span>—</span>
-          <input aria-label="Second team score" required type="number" min={0} max={999} value={b} onChange={e=>setB(e.target.value)}/>
-        </div>
-        {error && <div className="form-error" role="alert">{error}</div>}
+          <input aria-label={`Set ${i+1} second team score`} type="number" min={0} max={999} value={b}
+            onChange={e=>setFields(old=>old.map((v,j)=>j===i?([v[0],e.target.value] as [string,string]):v))}/>
+        </div>)}
+        {error&&<div className="form-error" role="alert">{error}</div>}
         <div className="modal-footer"><button type="button" className="button button-outline" onClick={onClose}>Cancel</button>
-          <button type="submit" className="button button-primary" disabled={busy}><Save size={16}/> {previous ? 'Save correction' : 'Submit result'}</button></div>
+          <button type="submit" className="button button-primary" disabled={busy}><Save size={16}/> {previous.length?'Save correction':'Submit match result'}</button></div>
       </form>
     </div>
   </div>;
