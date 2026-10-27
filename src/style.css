@@ -233,3 +233,59 @@
 .round-scoring-fields .compact-checkbox { flex-direction: row; align-items: center; gap: 6px; min-height: 38px; }
 .round-scoring-decider { border-top: 1px dashed #bbc9dc; padding-top: 10px; margin-top: 10px; }
 @media(max-width: 630px) { .round-scoring-head { flex-wrap: wrap; } .round-scoring-fields { gap: 8px; } }
+
+/* v0.8a: each lane represents one phase of a four-team double bracket. */
+.double-ladder{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:16px;margin-top:20px;align-items:start}
+.double-stage{min-width:0;background:#f8fbff;border:1px solid #dae5f2;border-radius:11px;padding:15px}
+.double-stage h3{font-size:14px;margin:0 0 14px;color:#36577e}
+.double-stage-matches{display:flex;flex-direction:column;gap:14px}
+.double-ladder .bracket-match{margin:0;font-size:13px;background:white;border:1px solid #d5e2f0}
+.double-ladder .bracket-match>div{min-height:38px;align-items:center}
+.double-ladder .bracket-match>.double-match-label{font-size:12px;font-weight:800;color:#54739a;background:#eef5fe;min-height:27px;padding:6px 12px}
+.double-ladder .bracket-match>small{font-size:12px;color:#516984}
+.double-ladder .bracket-match .score-action{font-size:12px;color:#1d60b9;margin:8px}
+.double-ladder .bracket-team--winner{color:#16694a;background:#effaf4;font-weight:800}
+@media(max-width:1050px){.double-ladder{grid-template-columns:1fr}.double-stage-matches{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr))}}
+
+/* v0.8c — double-elimination display: two horizontal, independently
+   scrollable bracket trees, followed by a separate championship panel. */
+.double-bracket-board{display:flex;flex-direction:column;gap:22px;margin-top:18px}
+.double-bracket-section{min-width:0;border:1px solid #d4e1f1;border-radius:13px;padding:17px;background:#fff}
+.double-bracket-section>h3{font-size:19px;color:#1e3b62;margin:0 0 5px}
+.double-bracket-section>p{font-size:13px;color:#516984;margin:0 0 12px}
+.double-bracket-board .bracket-scroll{margin-top:8px}
+.lower-bracket-tree{position:relative;isolation:isolate}
+.lower-bracket-tree .bracket-match{position:absolute;left:0;width:100%;margin:0;display:flex;flex-direction:column;background:#fff;border:2px solid #b7c8df;border-radius:10px;overflow:hidden;font-size:13px;z-index:1;box-shadow:0 3px 8px rgba(22,40,71,.07)}
+.double-bracket-board .double-match-label{font-size:12px;font-weight:800;color:#36577e;background:#eff5fd;min-height:28px;padding:6px 12px}
+.double-bracket-board .bracket-match .bracket-team{min-height:38px;padding:8px 12px;display:flex;justify-content:space-between;align-items:center;gap:10px;border-bottom:1px solid #e3eaf4}
+.double-bracket-board .bracket-match .bracket-team span{color:#172a47;overflow-wrap:anywhere}
+.double-bracket-board .bracket-match .bracket-team strong{color:#243c61}
+.double-bracket-board .bracket-match .bracket-team--winner{background:#eaf9ee;font-weight:800}
+.double-bracket-board .bracket-match-status{font-size:11px;color:#516984;padding:6px 10px}
+.double-bracket-board .bracket-match .score-action{margin:auto 8px 7px;align-self:flex-start;font-size:12px;color:#1d60b9}
+.double-finals{display:flex;gap:20px;flex-wrap:wrap;align-items:flex-start}
+.double-finals>.bracket-match{margin:0;width:270px;min-height:148px;font-size:13px;background:#fff;border:2px solid #b7c8df}
+.qualification-controls{display:flex;gap:15px;flex-wrap:wrap;margin:16px 0}
+.qualification-controls>label{display:flex;flex-direction:column;gap:6px;font-size:13px;font-weight:650;color:#36577e;min-width:160px}
+.qualification-controls select,.qualification-controls input,.excluded-team select{min-height:37px;border:1px solid #c5d3e5;background:#fff;color:#243c61;border-radius:8px;padding:7px 10px;font-size:13px}
+.qualification-controls>label:first-child{min-width:270px;max-width:100%}
+.qualifier-actions{display:flex;align-items:center;flex-wrap:wrap;gap:13px;margin-bottom:13px;font-size:13px;color:#36577e}
+.excluded-teams{border-top:1px solid #e4eaf3;padding-top:12px;margin-top:13px}
+.excluded-teams h3{font-size:14px;color:#36577e;margin:0 0 8px}
+.excluded-team{display:flex;justify-content:space-between;align-items:center;gap:15px;border-bottom:1px solid #edf1f7;padding:6px 0;font-size:13px}
+.seed-actions .exclude-seed{color:#ad3540;font-size:17px;font-weight:700}
+@media(max-width:620px){.double-bracket-section{padding:12px}.qualification-controls{flex-direction:column}.qualification-controls>label{width:100%}.excluded-team{align-items:flex-start;flex-direction:column}}
+
+/* v0.9a: custom competition divisions (separate from playoff brackets). */
+.division-toolbar { margin: 18px 0 20px; padding: 16px 20px; }
+.division-toolbar-heading { display: flex; align-items: baseline; flex-wrap: wrap; gap: 8px 15px; margin-bottom: 13px; }
+.division-toolbar-heading strong { color: var(--text, inherit); font-size: 0.98rem; }
+.division-toolbar-heading span { color: var(--muted, #6b7280); font-size: 0.84rem; }
+.division-tabs { display: flex; gap: 9px; flex-wrap: wrap; }
+.division-tabs button { border: 1px solid #bdcbdc; border-radius: 9px; padding: 9px 14px;
+  cursor: pointer; background: #f8fafc; color: #243b53; font-weight: 650; }
+.division-tabs button:hover { background: #e8f1fc; }
+.division-tabs button.active { background: #163f75; color: white; border-color: #163f75; }
+.division-tabs .division-add { display: inline-flex; align-items: center; gap: 6px;
+  border-style: dashed; }
+.qualifier-no-byes { margin-top: 16px; }

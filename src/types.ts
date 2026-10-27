@@ -31,11 +31,18 @@ export interface Match {
 export interface SetScore { match_id: string; set_number: number; score_a: number; score_b: number; }
 export interface Division {
   id: string; tournament_id: string; name: string; format: DivisionFormat;
-  bracket_reset: boolean; sort_order: number; status?: 'draft' | 'ready' | 'active' | 'completed';
+  bracket_reset: boolean; sort_order: number; status?: 'draft' | 'ready' | 'active' | 'completed'; champion_team_id?: string | null;
+}
+/** Actual competition subdivision, distinct from a Gold/Silver playoff bracket. */
+export interface CompetitionDivisionSummary {
+  id: string; tournament_id: string; name: string; sort_order: number; status: TournamentStatus;
 }
 export interface TournamentBundle {
   tournament: Tournament; teams: Team[]; pools: Pool[]; poolTeams: PoolTeam[];
   matches: Match[]; scores: SetScore[]; divisions: Division[];
+  competitionDivisionName?: string;
+  competitionDivisions?: CompetitionDivisionSummary[];
+  selectedCompetitionDivisionId?: string;
   playoffMatches?: PlayoffMatch[]; playoffScores?: SetScore[]; roundRules?: PlayoffRoundRule[];
 }
 /** One planned playoff bracket within a competition division (not a sport/skill division). */
@@ -46,6 +53,7 @@ export interface PlannedBracket {
 }
 
 export interface NewTournamentInput {
+  divisionName?: string;
   name: string; sport: string; startsOn: string; teamNames: string[]; poolCount: number;
   poolSets: 1 | 2; targetPoints: number; winByTwo: boolean; pointCap?: number | null;
   poolScoring?: PoolScoringOverride[]; seedMode: SeedMode;
@@ -63,6 +71,7 @@ export interface PlayoffMatch {
   round_number: number;
   sequence: number;
   status: 'scheduled' | 'completed' | 'bye' | 'forfeit';
+  playoff_phase?: 'upper' | 'lower' | 'grand' | 'reset';
 }
 /** A completed single-set match's score uses the existing set_scores table. */
 export type BracketAssignments = Record<string, string[]>;

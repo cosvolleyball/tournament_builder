@@ -4,7 +4,15 @@
  * never trusted just because this TypeScript function returned a result.
  */
 import { standingsForPool } from './engine';
-import type { TournamentBundle } from './types';
+import type { TournamentBundle, DivisionFormat } from './types';
+
+/** Per-bracket rule count: upper rounds plus grand and optional reset final.
+ * Losers' rounds share the corresponding upper-round rule to keep the UI lean.
+ */
+export function playoffRoundCount(count:number, format:DivisionFormat):number {
+  if (!Number.isInteger(count) || count<2 || count>64) return 0;
+  return Math.ceil(Math.log2(count))+(format==='double'?2:0);
+}
 
 /** Standard balanced seed placement. 8 slots => 1,8,4,5,2,7,3,6. */
 export function seedPositions(participantCount: number): number[] {
@@ -50,6 +58,58 @@ export function suggestedAssignments(bundle: TournamentBundle): Record<string, s
   return result;
 }
 
+/**
+ * Pick qualifiers without assuming every pool has played the same number of
+ * matches or uses the same target score. Pool finishing place comes first;
+ * cross-pool wildcard candidates then use per-set win percentage, point ratio,
+ * average point differential, and initial seed as deterministic tie breakers.
+ *
+ * Final advancement is reviewed by the organizer, not made irreversible here.
+ */
+export type QualificationMode = 'all' | 'per_pool' | 'overall';
+
+export interface QualificationRule {
+  mode: QualificationMode;
+  topPerPool: number;
+  nextPlaceWildcards: number;
+  overallCount: number;
+}
+
+export function qualifiedTeamIds(bundle: TournamentBundle, rule: QualificationRule): string[] {
+  const sorted = rankedPoolTeams(bundle);
+  if (rule.mode === 'all') return sorted;
+  if (rule.mode === 'overall') {
+    return sorted.slice(0, Math.max(0, Math.min(sorted.length, Math.trunc(rule.overallCount) || 0)));
+  }
+  const top = Math.max(0, Math.trunc(rule.topPerPool) || 0);
+  const picked = new Set<string>();
+  const nextPlace: string[] = [];
+  for (const pool of bundle.pools) {
+    const ordered = standingsForPool(bundle, pool.id);
+    ordered.slice(0, top).forEach(entry => picked.add(entry.team.id));
+    if (ordered[top]) nextPlace.push(ordered[top].team.id);
+  }
+  // `sorted` already sorts equal finishing positions by normalized records.
+  const wildcardCount = Math.max(0, Math.trunc(rule.nextPlaceWildcards) || 0);
+  const wildcards = sorted.filter(id => nextPlace.includes(id)).slice(0, wildcardCount);
+  wildcards.forEach(id => picked.add(id));
+  return sorted.filter(id => picked.has(id));
+}
+
+/** Distribute only qualified teams among configured playoff brackets. */
+export function distributeQualifiers(bundle: TournamentBundle, teamIds: string[]): Record<string,string[]> {
+  const brackets = [...bundle.divisions].sort((a,b) => a.sort_order - b.sort_order);
+  const result: Record<string,string[]> = Object.fromEntries(brackets.map(bracket => [bracket.id, []]));
+  if (!brackets.length) return result;
+  brackets.forEach((bracket, index) => {
+    const base = Math.floor(teamIds.length / brackets.length);
+    const extra = teamIds.length % brackets.length;
+    const offset = index * base + Math.min(index, extra);
+    result[bracket.id] = teamIds.slice(offset, offset + base + (index < extra ? 1 : 0));
+  });
+  return result;
+}
+
 /** A bracket preview is separate from the database state. */
 export interface PreviewMatch {
   round: number;
@@ -79,8 +139,8 @@ export function previewSingleElimination(orderedTeamIds: string[]): PreviewMatch
 }
 
 /**
- * Every team enters exactly one of the existing brackets. Pool-only
- * tournaments have zero brackets and are handled separately.
+ * Qualifying is optional: a team may be excluded from every playoff bracket.
+ * No team may enter two brackets. At least two are needed in each bracket.
  */
 export function validateAssignments(bundle: TournamentBundle, assignments: Record<string, string[]>): string | null {
   const brackets = bundle.divisions;
@@ -91,7 +151,6 @@ export function validateAssignments(bundle: TournamentBundle, assignments: Recor
     return 'Bracket assignments do not match the configured brackets.';
   }
   for (const bracket of brackets) {
-    if (bracket.format !== 'single') return 'Double-elimination brackets will be available in the next development batch.';
     const participants = assignments[bracket.id];
     if (!participants || participants.length < 2) return `“${bracket.name}” needs at least two teams.`;
     if (participants.length > 64) return `“${bracket.name}” has too many teams.`;
@@ -100,6 +159,43 @@ export function validateAssignments(bundle: TournamentBundle, assignments: Recor
       used.add(id);
     }
   }
-  if (used.size !== known.size) return 'Every team must be assigned to exactly one bracket.';
+  return null;
+}
+
+/** First-round byes are absent only when each bracket is a power of two. */
+export function isByeFreeSize(size: number): boolean {
+  return Number.isInteger(size) && size >= 2 && size <= 64 && (size & (size - 1)) === 0;
+}
+
+/** Suggest the *next-place* wildcards needed for a full no-bye bracket.
+ * This is meaningful for one playoff bracket. The UI validates every bracket
+ * after seeds have been distributed, including Gold/Silver configurations.
+ */
+export function suggestedByeFreeWildcards(bundle: TournamentBundle, topPerPool: number): {
+  count: number; target: number; available: number; possible: boolean;
+} {
+  const top = Math.max(0, Math.trunc(topPerPool) || 0);
+  let automatic = 0;
+  let available = 0;
+  for (const pool of bundle.pools) {
+    const count = standingsForPool(bundle, pool.id).length;
+    automatic += Math.min(top,count);
+    if (count > top) available += 1;
+  }
+  const bracketCount = Math.max(1, bundle.divisions.length);
+  let each = 2;
+  while (each * bracketCount < automatic && each < 64) each *= 2;
+  const target = each * bracketCount;
+  return {count: Math.max(0,target-automatic), target, available,
+    possible: each <= 64 && target - automatic <= available};
+}
+
+export function byeFreeAssignmentsError(bundle: TournamentBundle, assignments: Record<string,string[]>): string | null {
+  for (const bracket of bundle.divisions) {
+    const size = assignments[bracket.id]?.length ?? 0;
+    if (!isByeFreeSize(size)) {
+      return `“${bracket.name}” has ${size} entrants. To avoid first-round byes, use 2, 4, 8, 16, 32 or 64 teams in each bracket.`;
+    }
+  }
   return null;
 }

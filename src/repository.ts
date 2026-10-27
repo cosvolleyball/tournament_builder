@@ -1,9 +1,8 @@
 /**
  * Tournament Builder data adapter (alpha build).
  *
- * The current UI edits ONE "Open" competition division per tournament.
- * Our v0.2 database supports several competition divisions under a tournament;
- * later, the UI can be extended without changing the storage model.
+ * The tournament has independent custom competition divisions.
+ * Each division owns its teams, pools, matches and playoff brackets.
  *
  * Local demo mode continues to use the v0.1 browser-storage format.
  * Browser-side credentials are limited to the Supabase publishable/anon key;
@@ -44,7 +43,7 @@ function check(error: { message: string } | null): void {
 function asUiTournament(row: any, settings: any): Tournament {
   return {
     id: row.id, owner_id: row.owner_id, name: row.name, sport: row.sport,
-    starts_on: row.starts_on, status: row.status, created_at: row.created_at,
+    starts_on: row.starts_on, status: settings?.status ?? row.status, created_at: row.created_at,
     pool_count: settings?.pool_count ?? 1, pool_sets: settings?.pool_sets ?? 2,
     target_points: settings?.target_points ?? 21,
     win_by_two: settings?.win_by_two ?? true,
@@ -72,11 +71,11 @@ export async function listTournaments(userId: string | null): Promise<Tournament
   for (const division of settings ?? []) {
     if (!firstDivision.has(division.tournament_id)) firstDivision.set(division.tournament_id, division);
   }
-  return rows.map(row => asUiTournament(row, firstDivision.get(row.id)));
+  return rows.map(row => ({...asUiTournament(row, firstDivision.get(row.id)), status:row.status}));
 }
 
-/** Load the Open competition division (the only division exposed by this UI build). */
-export async function getTournament(id: string): Promise<TournamentBundle> {
+/** Load the requested custom division, or the first one if unspecified. */
+export async function getTournament(id: string, divisionId?: string | null): Promise<TournamentBundle> {
   if (demoMode) {
     const result = demoBundles().find(b => b.tournament.id === id);
     if (!result) throw new Error('Tournament not found in this browser.');
@@ -91,8 +90,10 @@ export async function getTournament(id: string): Promise<TournamentBundle> {
     .from('competition_divisions').select('*').eq('tournament_id', id)
     .order('sort_order');
   check(dError);
-  const chosen = compDivisions?.[0];
-  if (!chosen) throw new Error('This tournament has no competition division yet.');
+  const chosen = divisionId
+    ? compDivisions?.find(division => division.id === divisionId)
+    : compDivisions?.[0];
+  if (!chosen) throw new Error('Competition division not found in this tournament.');
 
   const [teamsResult, poolsResult, poolTeamsResult, matchesResult, bracketsResult, rulesResult] = await Promise.all([
     db.from('teams').select('*').eq('division_id', chosen.id).order('seed'),
@@ -144,7 +145,7 @@ export async function getTournament(id: string): Promise<TournamentBundle> {
   }));
   const divisions: Division[] = (bracketsResult.data ?? []).map(row => ({
     id: row.id, tournament_id: row.tournament_id, name: row.name,
-    format: row.format, bracket_reset: row.bracket_reset, sort_order: row.sort_order, status: row.status,
+    format: row.format, bracket_reset: row.bracket_reset, sort_order: row.sort_order, status: row.status, champion_team_id: row.champion_team_id ?? null,
   }));
   const scores: SetScore[] = (scoreResult.data ?? []).map(row => ({
     match_id: row.match_id, set_number: row.set_number, score_a: row.score_a, score_b: row.score_b,
@@ -153,6 +154,7 @@ export async function getTournament(id: string): Promise<TournamentBundle> {
     id: row.id, tournament_id: row.tournament_id, division_id: row.division_id,
     bracket_id: row.bracket_id, team_a_id: row.team_a_id, team_b_id: row.team_b_id,
     round_number: row.round_number, sequence: row.sequence, status: row.status,
+    playoff_phase: row.playoff_phase ?? 'upper',
   }));
   const playoffScores: SetScore[] = (playoffScoreResult.data ?? []).map(row => ({
     match_id: row.match_id, set_number: row.set_number,
@@ -168,11 +170,17 @@ export async function getTournament(id: string): Promise<TournamentBundle> {
   return {
     tournament: asUiTournament(tournament, chosen), teams, pools,
     poolTeams, matches, scores, divisions, playoffMatches, playoffScores,roundRules,
+    selectedCompetitionDivisionId: chosen.id,
+    competitionDivisionName: chosen.name,
+    competitionDivisions: (compDivisions ?? []).map(division => ({
+      id: division.id, tournament_id: id, name: division.name,
+      sort_order: division.sort_order, status: division.status,
+    })),
   };
 }
 
 /**
- * Persist a v0.1 tournament as one Open competition division.
+ * Persist a new tournament with its first organizer-named competition division.
  * Insertion order follows foreign key dependencies. If anything fails,
  * removing the parent tournament cascades all child records.
  *
@@ -193,7 +201,7 @@ export async function createTournament(bundle: TournamentBundle, userId: string 
 
   try {
     const { error: dError } = await db.from('competition_divisions').insert({
-      id: newDivisionId, tournament_id: t.id, name: 'Open', sort_order: 0,
+      id: newDivisionId, tournament_id: t.id, name: bundle.competitionDivisionName ?? 'Open', sort_order: 0,
       status: 'draft', pool_count: t.pool_count, pool_sets: t.pool_sets,
       target_points: t.target_points, win_by_two: t.win_by_two,
       point_cap: t.point_cap ?? null, seed_mode: t.seed_mode,
@@ -247,6 +255,62 @@ export async function createTournament(bundle: TournamentBundle, userId: string 
   }
 }
 
+/** Add a fully independent custom division to a DRAFT tournament.
+ * Existing tournament data and divisions are untouched on failure.
+ */
+export async function addCompetitionDivision(
+  tournamentId: string, bundle: TournamentBundle, userId: string | null,
+): Promise<string> {
+  if (demoMode) throw new Error('Adding divisions requires Supabase.');
+  if (!userId) throw new Error('Sign in before adding a division.');
+  const db = requireDb();
+  const { data: parent, error: parentError } = await db.from('tournaments')
+    .select('id,owner_id,status').eq('id', tournamentId).single();
+  check(parentError);
+  if (!parent || parent.owner_id !== userId || parent.status !== 'draft') {
+    throw new Error('Only the owner can add divisions before the tournament is published.');
+  }
+  const { data: existing, error: listError } = await db.from('competition_divisions')
+    .select('name,sort_order').eq('tournament_id', tournamentId).order('sort_order');
+  check(listError);
+  const name = (bundle.competitionDivisionName ?? '').trim();
+  if (!name || name.length > 100) throw new Error('Enter a division name (1–100 characters).');
+  if ((existing ?? []).some(row => row.name.toLocaleLowerCase() === name.toLocaleLowerCase())) {
+    throw new Error('Division names must be unique within a tournament.');
+  }
+  const nextOrder = Math.max(-1,...(existing ?? []).map(row => row.sort_order)) + 1;
+  const divisionId = crypto.randomUUID();
+  const { error: insertError } = await db.from('competition_divisions').insert({
+    id: divisionId, tournament_id: tournamentId, name, sort_order: nextOrder,
+    status: 'draft', pool_count: bundle.tournament.pool_count,
+    pool_sets: bundle.tournament.pool_sets, target_points: bundle.tournament.target_points,
+    win_by_two: bundle.tournament.win_by_two,
+    point_cap: bundle.tournament.point_cap ?? null,
+    seed_mode: bundle.tournament.seed_mode,
+  });
+  check(insertError);
+
+  try {
+    const teams = bundle.teams.map(row => ({...row,tournament_id:tournamentId,division_id:divisionId}));
+    const pools = bundle.pools.map(row => ({...row,tournament_id:tournamentId,division_id:divisionId}));
+    const poolTeams = bundle.poolTeams.map(row => ({...row,tournament_id:tournamentId,division_id:divisionId}));
+    const brackets = bundle.divisions.map(row => ({...row,tournament_id:tournamentId,division_id:divisionId,status:'draft'}));
+    const matches = bundle.matches.map(row => ({...row,tournament_id:tournamentId,division_id:divisionId,stage:'pool',bracket_id:null}));
+    // Insert each row type into its specific table. Keeping the table name
+    // literal prevents TypeScript from mixing the different row shapes.
+    if (teams.length) check((await db.from('teams').insert(teams)).error);
+    if (pools.length) check((await db.from('pools').insert(pools)).error);
+    if (poolTeams.length) check((await db.from('pool_teams').insert(poolTeams)).error);
+    if (brackets.length) check((await db.from('playoff_brackets').insert(brackets)).error);
+    if (matches.length) check((await db.from('matches').insert(matches)).error);
+    return divisionId;
+  } catch (cause) {
+    const {error: cleanupError} = await db.from('competition_divisions').delete().eq('id',divisionId);
+    if (cleanupError) throw new Error(`Division creation failed; cleanup failed too: ${cleanupError.message}; original: ${String(cause)}`);
+    throw cause;
+  }
+}
+
 /** Transition the tournament lifecycle. Alpha UI controls allowed transitions. */
 export async function changeStatus(id: string, status: TournamentStatus): Promise<void> {
   if (demoMode) {
@@ -256,8 +320,12 @@ export async function changeStatus(id: string, status: TournamentStatus): Promis
     result.tournament.status = status; writeDemo(data);
     return;
   }
-  const { error } = await requireDb().from('tournaments').update({ status }).eq('id', id);
+  const db = requireDb();
+  const { error } = await db.from('tournaments').update({ status }).eq('id', id);
   check(error);
+  const { error: divisionError } = await db.from('competition_divisions')
+    .update({status}).eq('tournament_id',id);
+  check(divisionError);
 }
 
 /** Persist full pool results atomically via the SQL function from database v0.2. */
@@ -309,13 +377,17 @@ export async function finalizePoolAndCreatePlayoffs(
   bundle: TournamentBundle,
   assignments: BracketAssignments,
   roundRules: RoundRulesByBracket,
+  requireNoByes = false,
 ): Promise<void> {
   if (demoMode) {
     // Local demo supports preview only, not a fake persisted playoff engine.
     throw new Error('Bracket finalization requires the connected Supabase project.');
   }
-  const { error } = await requireDb().rpc('finalize_with_playoff_round_rules', {
+  if (!bundle.selectedCompetitionDivisionId) throw new Error('No competition division selected.');
+  const { error } = await requireDb().rpc('finalize_one_competition_division', {
     p_tournament_id: bundle.tournament.id,
+    p_division_id: bundle.selectedCompetitionDivisionId,
+    p_require_no_byes: requireNoByes,
     p_assignments: assignments,
     p_round_rules: roundRules,
   });

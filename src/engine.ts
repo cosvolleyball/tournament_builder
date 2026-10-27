@@ -93,7 +93,9 @@ export function createBundle(input: NewTournamentInput): TournamentBundle {
     format: bracket.format, bracket_reset: bracket.bracketReset,
     sort_order: index + 1,
   }));
-  return { tournament, teams, pools, poolTeams, matches, scores: [], divisions };
+  const competitionDivisionName = (input.divisionName ?? 'Open').trim();
+  if (!competitionDivisionName || competitionDivisionName.length > 100) throw new Error('Enter a division name (1–100 characters).');
+  return { tournament, teams, pools, poolTeams, matches, scores: [], divisions, competitionDivisionName };
 }
 
 export function countCompleteMatchSets(match: Match, scores: SetScore[], required: number): SetScore[] {

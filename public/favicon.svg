@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <rect width="64" height="64" rx="14" fill="#101e33"/>
+  <rect x="7" y="7" width="50" height="50" rx="11" fill="#2876e8"/>
+  <!-- Simplified trophy silhouette that matches the Tournament Builder header icon. -->
+  <g fill="none" stroke="#fff" stroke-width="4" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M22 17h20v11c0 9-5 15-10 15s-10-6-10-15V17Z"/>
+    <path d="M22 22h-7v5c0 6 4 10 10 10M42 22h7v5c0 6-4 10-10 10"/>
+    <path d="M32 43v6m-9 0h18"/>
+  </g>
+</svg>

@@ -10,17 +10,17 @@ import {
 import type { Session } from '@supabase/supabase-js';
 import type { BracketAssignments, Match, NewTournamentInput, PlannedBracket, PlayoffMatch, PlayoffRoundRule, RoundRulesByBracket, Pool, SetScore, Tournament, TournamentBundle } from './types';
 import { assignPools, createBundle, scoreError, scoringForPool, standingsForPool, validateScoringRules } from './engine';
-import { previewSingleElimination, suggestedAssignments, validateAssignments } from './playoffs';
+import { previewSingleElimination, suggestedAssignments, validateAssignments, playoffRoundCount, rankedPoolTeams, qualifiedTeamIds, distributeQualifiers, suggestedByeFreeWildcards, byeFreeAssignmentsError, type QualificationRule } from './playoffs';
 import { effectiveRoundRule, evaluateSeries, roundRuleError, scorePairs } from './playoffFormats';
-import { changeStatus, correctPlayoffScore, createTournament, deleteTournament, demoMode, finalizePoolAndCreatePlayoffs, getTournament, listTournaments, submitPlayoffScore, submitScore, supabase } from './repository';
+import { addCompetitionDivision, changeStatus, correctPlayoffScore, createTournament, deleteTournament, demoMode, finalizePoolAndCreatePlayoffs, getTournament, listTournaments, submitPlayoffScore, submitScore, supabase } from './repository';
 import './style.css';
 
-type Screen = 'home' | 'new' | 'detail';
+type Screen = 'home' | 'new' | 'detail' | 'addDivision';
 type DetailTab = 'overview' | 'pools' | 'playoffs';
 const sampleTeams = Array.from({ length: 16 }, (_, i) => `Team ${i + 1}`);
 const today = new Date().toISOString().slice(0, 10);
 const blankInput: NewTournamentInput = {
-  name: '', sport: 'Volleyball', startsOn: today, teamNames: [], poolCount: 4,
+  name: '', divisionName: 'Open', sport: 'Volleyball', startsOn: today, teamNames: [], poolCount: 4,
   poolSets: 2, targetPoints: 21, winByTwo: true, pointCap: null, poolScoring: [], seedMode: 'snake',
   playoffBrackets: [{ name: 'Championship', format: 'single', bracketReset: true }],
 };
@@ -33,6 +33,7 @@ function App() {
   const [authChecked, setAuthChecked] = useState(demoMode);
   const [screen, setScreen] = useState<Screen>(new URLSearchParams(window.location.search).has('t') ? 'detail' : 'home');
   const [activeId, setActiveId] = useState(new URLSearchParams(window.location.search).get('t'));
+  const [activeDivisionId, setActiveDivisionId] = useState(new URLSearchParams(window.location.search).get('d'));
   const [records, setRecords] = useState<Tournament[]>([]);
   const [bundle, setBundle] = useState<TournamentBundle | null>(null);
   const [loading, setLoading] = useState(false);
@@ -62,6 +63,7 @@ function App() {
     setBundle(null);
     setScreen('home');
     setActiveId(null);
+    setActiveDivisionId(null);
     setLoginOpen(false);
     setMobileMenu(false);
     setError('');
@@ -118,12 +120,12 @@ function App() {
     setBundle(null);
     setLoading(true);
     setError('');
-    getTournament(activeId)
+    getTournament(activeId,activeDivisionId)
       .then(next => { if (!cancelled) setBundle(next); })
       .catch(e => { if (!cancelled) setError(String(e.message ?? e)); })
       .finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
-  }, [activeId, screen, authChecked, userId]);
+  }, [activeId, activeDivisionId, screen, authChecked, userId]);
 
   useEffect(() => {
     const handler = () => {
@@ -135,6 +137,7 @@ function App() {
       }
       const id = new URLSearchParams(window.location.search).get('t');
       setActiveId(id);
+      setActiveDivisionId(new URLSearchParams(window.location.search).get('d'));
       setScreen(id ? 'detail' : 'home');
     };
     window.addEventListener('popstate', handler);
@@ -158,7 +161,7 @@ function App() {
       if (document.visibilityState !== 'visible') return;
       const version = workspaceVersion.current;
       try {
-        const next = await getTournament(id);
+        const next = await getTournament(id,activeDivisionId);
         if (cancelled || workspaceVersion.current !== version) return;
         setBundle(current => current?.tournament.id === id ? next : current);
       } catch {
@@ -168,17 +171,17 @@ function App() {
     };
     const timer = window.setInterval(refresh, 15000);
     return () => { cancelled = true; window.clearInterval(timer); };
-  }, [authChecked, screen, activeId, userId]);
+  }, [authChecked, screen, activeId, activeDivisionId, userId]);
 
-  const navigate = (where: Screen, id: string | null = null) => {
+  const navigate = (where: Screen, id: string | null = null, divisionId: string | null = null) => {
     if (where === 'new' && !demoMode && !session) { setToast('Sign in to create a tournament.'); return; }
-    const url = id ? `?t=${encodeURIComponent(id)}` : window.location.pathname;
+    const url = id ? `?t=${encodeURIComponent(id)}${divisionId?`&d=${encodeURIComponent(divisionId)}`:''}` : window.location.pathname;
     window.history.pushState(null, '', url);
-    setScreen(where); setActiveId(id); setMobileMenu(false); setError('');
+    setScreen(where); setActiveId(id); setActiveDivisionId(divisionId); setMobileMenu(false); setError('');
   };
   const reload = async (id: string) => {
     const version = workspaceVersion.current;
-    const [next, summaries] = await Promise.all([getTournament(id), listTournaments(session?.user.id ?? null)]);
+    const [next, summaries] = await Promise.all([getTournament(id,activeDivisionId), listTournaments(session?.user.id ?? null)]);
     if (workspaceVersion.current !== version) return;
     setBundle(next); setRecords(summaries);
   };
@@ -198,6 +201,16 @@ function App() {
       setRecords(next);
       navigate('detail', created.tournament.id);
     }, 'Tournament created successfully.');
+  };
+  const handleAddDivision = async (input: NewTournamentInput) => {
+    if (!bundle || !owner) throw new Error('An organizer must select a draft tournament.');
+    const parentId = bundle.tournament.id;
+    const created = createBundle({...input,name:bundle.tournament.name,
+      sport:bundle.tournament.sport,startsOn:bundle.tournament.starts_on??''});
+    await perform(async () => {
+      const newDivisionId = await addCompetitionDivision(parentId,created,session?.user.id??null);
+      navigate('detail',parentId,newDivisionId);
+    }, `Division “${created.competitionDivisionName}” added.`);
   };
   const handleStatus = async (status: 'published' | 'pool_play') => {
     if (!bundle) return;
@@ -220,11 +233,11 @@ function App() {
   // The alpha build uses the pre-created Supabase email/password account.
   // Public signups are disabled at the Supabase project level.
   /** Organizer review is authoritative only after Supabase validates every pool result and seed. */
-  const handleFinalizePlayoffs = async (assignments: BracketAssignments, roundRules: RoundRulesByBracket) => {
+  const handleFinalizePlayoffs = async (assignments: BracketAssignments, roundRules: RoundRulesByBracket, noByes: boolean) => {
     if (!bundle || !owner) throw new Error('Only an organizer may finalize pool play.');
     const id = bundle.tournament.id;
     await perform(async () => {
-      await finalizePoolAndCreatePlayoffs(bundle, assignments, roundRules);
+      await finalizePoolAndCreatePlayoffs(bundle, assignments, roundRules, noByes);
       await reload(id);
     }, bundle.divisions.length ? 'Pool play finalized. Playoff brackets generated.' : 'Final standings approved.');
   };
@@ -293,7 +306,7 @@ function App() {
       <aside className={`sidebar ${mobileMenu ? 'open' : ''}`}>
         <div className="brand" onClick={() => navigate('home')} role="button" tabIndex={0} onKeyDown={e => { if (e.key === 'Enter') navigate('home'); }}>
           <span className="brand-icon"><Trophy size={23} strokeWidth={2.2}/></span>
-          <span className="brand-words"><strong>Tournament<span>Builder</span></strong><small>THE ORGANIZER'S HUB</small></span>
+          <span className="brand-words"><strong>Tournament<span>Builder</span></strong><small>BETA</small></span>
         </div>
         <div className="sidebar-content">
           <div className="sidebar-label">WORKSPACE</div>
@@ -317,7 +330,7 @@ function App() {
       <main className="main-area">
         <header className="topbar">
           <button className="icon-button mobile-menu" onClick={() => setMobileMenu(v => !v)} aria-label="Open menu"><Menu size={21}/></button>
-          <div className="breadcrumb"><span>Workspace</span><ChevronRight size={15}/><strong>{!authenticatedWorkspace && screen === 'home' ? 'Home' : screen === 'new' ? 'New tournament' : screen === 'detail' ? (bundle?.tournament.name ?? 'Tournament') : 'Overview'}</strong></div>
+          <div className="breadcrumb"><span>Workspace</span><ChevronRight size={15}/><strong>{!authenticatedWorkspace && screen === 'home' ? 'Home' : screen === 'new' ? 'New tournament' : screen === 'addDivision' ? 'New division' : screen === 'detail' ? (bundle?.tournament.name ?? 'Tournament') : 'Overview'}</strong></div>
           <div className="topbar-actions">
             {demoMode ? <span className="mode-pill"><span className="online-dot"/> Demo workspace</span> : !session ? <button className="button button-outline small" onClick={signIn}>Organizer sign in</button>
               : <button className="account-button" onClick={handleSignOut} title="Sign out"><span className="avatar">{(session.user.email?.[0] ?? 'U').toUpperCase()}</span><span className="account-email">{session.user.email}</span><span className="signout-label">Sign out</span></button>}
@@ -331,8 +344,16 @@ function App() {
                 : <PublicHome onSignIn={signIn}/>)
             : screen === 'new' && !authenticatedWorkspace ? <PublicHome onSignIn={signIn}/>
             : screen === 'new' ? <NewWizard onBack={() => navigate('home')} onCreate={handleCreate} busy={loading}/>
+            : screen === 'addDivision' && bundle && owner && bundle.tournament.status==='draft'
+                ? <NewWizard key={bundle.tournament.id} existingTournament={bundle.tournament}
+                    onBack={()=>navigate('detail',bundle.tournament.id,bundle.selectedCompetitionDivisionId)}
+                    onCreate={handleAddDivision} busy={loading}/>
+                : screen === 'addDivision' ? <div className="center-message">New divisions can only be added before publishing.</div>
             : loading && !bundle ? <div className="center-message">Loading tournament…</div>
-            : bundle && activeId === bundle.tournament.id ? <TournamentPage bundle={bundle} isOwner={owner} busy={loading} onBack={() => navigate('home')} onStatus={handleStatus} onScore={handleScore} onDelete={handleDelete} onFinalize={handleFinalizePlayoffs} onPlayoffScore={handlePlayoffScore}/>
+            : bundle && activeId === bundle.tournament.id ? <TournamentPage key={`${bundle.tournament.id}:${bundle.selectedCompetitionDivisionId??''}`}
+                bundle={bundle} isOwner={owner} busy={loading} onBack={() => navigate('home')}
+                onSelectDivision={divisionId=>navigate('detail',bundle.tournament.id,divisionId)}
+                onAddDivision={()=>navigate('addDivision',bundle.tournament.id,bundle.selectedCompetitionDivisionId)} onStatus={handleStatus} onScore={handleScore} onDelete={handleDelete} onFinalize={handleFinalizePlayoffs} onPlayoffScore={handlePlayoffScore}/>
             : <div className="center-message">Tournament not found or not accessible. <button className="text-link" onClick={() => navigate('home')}>Back to dashboard</button></div>}
         </div>
       </main>
@@ -390,8 +411,15 @@ function Metric({ icon, label, value, hint }: { icon: React.ReactNode; label: st
   return <div className="metric"><div className="metric-icon">{icon}</div><p>{label}</p><div className="metric-value">{value}</div><span>{hint}</span></div>;
 }
 
-function NewWizard({ onBack, onCreate, busy }: { onBack: () => void; onCreate: (input: NewTournamentInput) => Promise<void>; busy: boolean }) {
-  const [input, setInput] = useState<NewTournamentInput>({ ...blankInput, startsOn: randomExampleDate() });
+function NewWizard({ onBack, onCreate, busy, existingTournament }: {
+  onBack: () => void; onCreate: (input: NewTournamentInput) => Promise<void>;
+  busy: boolean; existingTournament?: Tournament;
+}) {
+  const [input, setInput] = useState<NewTournamentInput>({ ...blankInput,
+    name:existingTournament?.name??'', sport:existingTournament?.sport??'Volleyball',
+    startsOn:existingTournament?.starts_on??randomExampleDate(),
+    divisionName:existingTournament?'':'Open',
+  });
   const [teamText, setTeamText] = useState('');
   const [playoffMode, setPlayoffMode] = useState<'championship' | 'multi' | 'none'>('championship');
   const [localError, setLocalError] = useState('');
@@ -453,24 +481,35 @@ function NewWizard({ onBack, onCreate, busy }: { onBack: () => void; onCreate: (
         const rule = input.poolScoring?.[i];
         if (rule?.enabled) validateScoringRules(rule);
       }
+      if (!(input.divisionName??'').trim()) throw new Error('Name this competition division.');
       await onCreate({ ...input, teamNames: teams });
     } catch (e) { setLocalError(e instanceof Error ? e.message : String(e)); }
   };
   return <div className="page-enter"><button className="back-button" onClick={onBack}><ArrowLeft size={16}/> All tournaments</button>
-    <div className="page-heading compact"><div><span className="eyebrow">LET'S BUILD SOMETHING GREAT</span><h1>Create a tournament</h1><p>Set your rules. We'll build the pool schedule automatically.</p></div></div>
-    <form onSubmit={submit} className="builder-layout"><div className="builder-form">
-      <section className="form-card"><div className="form-section-title"><span className="step-num">01</span><div><h2>The essentials</h2><p>Give your tournament a name and a date.</p></div></div>
+    <div className="page-heading compact"><div><span className="eyebrow">LET'S BUILD SOMETHING GREAT</span><h1>{existingTournament?'Add custom division':'Create a tournament'}</h1><p>{existingTournament
+      ? 'Set up another independent division with its own teams, pools and playoffs.'
+      : 'Start with your tournament details, then name the first division and configure its games.'}</p></div></div>
+    <form onSubmit={submit} className="builder-layout">
+      <div className="builder-form">
+      {!existingTournament && <section className="form-card"><div className="form-section-title"><span className="step-num">01</span><div><h2>The essentials</h2><p>Give your tournament a name, sport and date.</p></div></div>
         <div className="field"><label htmlFor="t-name">Tournament name</label><input id="t-name" value={input.name} required maxLength={120} placeholder="e.g. Fall Classic Volleyball Open" onChange={e => update('name', e.target.value)}/></div>
         <div className="form-grid"><div className="field"><label htmlFor="sport">Sport</label><select id="sport" value={input.sport} onChange={e => update('sport', e.target.value)}><option>Volleyball</option><option>Generic</option></select></div>
           <div className="field"><label htmlFor="date">Tournament date</label><input id="date" type="date" value={input.startsOn} onChange={e => update('startsOn', e.target.value)}/></div></div>
+      </section>}
+      <section className="form-card"><div className="form-section-title"><span className="step-num">02</span><div><h2>Divisions</h2><p>{existingTournament
+          ? 'Name this additional division. It will have its own teams, pools, results and playoffs.'
+          : 'Name your first division. You can add more divisions from the tournament page while the tournament is still a draft.'}</p></div></div>
+        <div className="field"><label htmlFor="division-name">Division name</label><input id="division-name" type="text" maxLength={100} required value={input.divisionName??''}
+          onChange={e=>update('divisionName',e.target.value)} placeholder="e.g. Coed BB, Men's A, Intermediate"/>
+          <span className="field-hint">Use any name you like—skill level, gender, both, or something else.</span></div>
       </section>
-      <section className="form-card"><div className="form-section-title"><span className="step-num">02</span><div><h2>Teams & pools</h2><p>Add a team per line and choose how they'll be distributed.</p></div></div>
+      <section className="form-card"><div className="form-section-title"><span className="step-num">03</span><div><h2>Teams & pools</h2><p>Add a team per line and choose how they'll be distributed.</p></div></div>
         <div className="field"><div className="field-inline"><label htmlFor="teams">Team names</label><button type="button" className="text-link" onClick={() => {setTeamText(sampleTeams.join('\n'));update('poolCount',4);}}>Use 16 sample teams <ArrowUpRight size={13}/></button></div>
           <textarea id="teams" rows={7} value={teamText} onChange={e => setTeamText(e.target.value)} placeholder={'Eagles\nWolves\nFalcons\nBears'}/><span className="field-hint">{teams.length} / 64 teams entered. Their order is their initial seed order.</span></div>
         <div className="form-grid"><div className="field"><label htmlFor="poolCount">Number of pools</label><input id="poolCount" type="number" min={1} max={32} value={input.poolCount} onChange={e => update('poolCount',Number(e.target.value))}/></div>
           <div className="field"><label htmlFor="seeding">Pool distribution</label><select id="seeding" value={input.seedMode} onChange={e => update('seedMode',e.target.value as 'snake'|'random')}><option value="snake">Seeded · snake</option><option value="random">Random assignment</option></select></div></div>
       </section>
-      <section className="form-card"><div className="form-section-title"><span className="step-num">03</span><div><h2>Game format</h2><p>Configure pool-play scoring and future playoff divisions.</p></div></div>
+      <section className="form-card"><div className="form-section-title"><span className="step-num">04</span><div><h2>Game format</h2><p>Configure pool-play scoring and playoff brackets for this division.</p></div></div>
         <div className="form-grid"><div className="field"><label htmlFor="sets">Sets per pool matchup</label><select id="sets" value={input.poolSets} onChange={e => update('poolSets', Number(e.target.value) as 1|2)}><option value={1}>1 fixed set</option><option value={2}>2 fixed sets (1–1 allowed)</option></select></div>
           <div className="field"><label htmlFor="points">Points to win a set</label><input id="points" type="number" min={1} max={100} value={input.targetPoints} onChange={e => update('targetPoints',Number(e.target.value))}/></div></div>
         <label className="checkbox-row"><input type="checkbox" checked={input.winByTwo} onChange={e => setInput(old=>({...old, winByTwo:e.target.checked, pointCap:e.target.checked ? old.pointCap : null}))}/><span><strong>Win by two points</strong><small>Sets continue beyond the target until a team leads by two.</small></span></label>
@@ -518,16 +557,17 @@ function NewWizard({ onBack, onCreate, busy }: { onBack: () => void; onCreate: (
             <div className="field"><label htmlFor={`bracket-name-${index}`}>Bracket name</label><input id={`bracket-name-${index}`} value={bracket.name} maxLength={60} onChange={e=>editBracket(index,{name:e.target.value})}/></div>
             <div className="field"><label htmlFor={`bracket-format-${index}`}>Elimination format</label><select id={`bracket-format-${index}`} value={bracket.format} onChange={e=>editBracket(index,{format:e.target.value as 'single'|'double'})}><option value="single">Single elimination</option><option value="double">Double elimination</option></select></div>
           </div>
-          {bracket.format==='double' && <label className="checkbox-row"><input type="checkbox" checked={bracket.bracketReset} onChange={e=>editBracket(index,{bracketReset:e.target.checked})}/><span><strong>Bracket reset final</strong><small>Lower-bracket winner must beat undefeated finalist twice.</small></span></label>}
+          {bracket.format==='double' && <p className="field-hint">Supports 2–64 seeded teams per bracket, with automatic byes for non-power-of-two fields.</p>}
+          {bracket.format==='double' && <label className="checkbox-row"><input type="checkbox" checked={bracket.bracketReset} onChange={e=>editBracket(index,{bracketReset:e.target.checked})}/><span><strong>Play a second grand final if needed</strong><small>If the losers' bracket finalist wins Grand Final 1, play Grand Final 2 to decide the champion.</small></span></label>}
           {playoffMode==='multi' && <button className="text-link remove-bracket" type="button" onClick={()=>update('playoffBrackets',input.playoffBrackets.filter((_,i)=>i!==index))}>Remove this bracket</button>}
         </div>)}
         {playoffMode==='multi' && input.playoffBrackets.length < 8 && <button type="button" className="button button-outline" onClick={addBracket}><Plus size={15}/> Add playoff bracket</button>}
         {playoffMode==='none' && <p className="field-hint">No playoff bracket will be created. The tournament will finish with approved pool standings.</p>}
-        <div className="info-inline"><ShieldCheck size={17}/> Bracket settings are saved as a plan. Results review and actual bracket generation are separate organizer actions in a later milestone.</div>
+        <div className="info-inline"><ShieldCheck size={17}/> Bracket seeds and round scoring settings are approved after pool play, before playoff matches are generated.</div>
       </section>
       {localError && <div className="form-error" role="alert">{localError}</div>}
-      <div className="builder-buttons"><button type="button" className="button button-outline" onClick={onBack}>Cancel</button><button type="submit" className="button button-primary" disabled={busy}>{busy ? 'Creating…' : 'Create tournament'} <ArrowRight size={17}/></button></div>
-    </div><aside className="builder-side"><div className="summary-card"><span className="eyebrow">LIVE PREVIEW</span><h3>{input.name.trim() || 'Your tournament'}</h3><p>{input.sport} · {input.startsOn || 'Date TBD'}</p>
+      <div className="builder-buttons"><button type="button" className="button button-outline" onClick={onBack}>Cancel</button><button type="submit" className="button button-primary" disabled={busy}>{busy ? 'Creating…' : existingTournament?'Add division':'Create tournament'} <ArrowRight size={17}/></button></div>
+    </div><aside className="builder-side"><div className="summary-card"><span className="eyebrow">LIVE PREVIEW</span><h3>{input.name.trim() || 'Your tournament'}</h3><p><strong>Division:</strong> {input.divisionName?.trim()||'Untitled'}</p><p>{input.sport} · {input.startsOn || 'Date TBD'}</p>
         <div className="summary-metrics"><div><strong>{teams.length}</strong><span>Teams</span></div><div><strong>{input.poolCount}</strong><span>Pools</span></div><div><strong>{matchCount}</strong><span>Pool matches</span></div><div><strong>{matchCount*input.poolSets}</strong><span>Pool sets</span></div></div>
         <div className="summary-label">POOLS AT A GLANCE</div>
         {teams.length >= 2 && input.poolCount <= teams.length / 2 ? <div className="preview-pools">{poolSizes.map((n, i) => <div key={i}><span>Pool {String.fromCharCode(65+i)}</span><strong>{n} teams</strong></div>)}</div> : <div className="preview-placeholder">Add enough teams to preview pool distribution.</div>}
@@ -538,11 +578,12 @@ function NewWizard({ onBack, onCreate, busy }: { onBack: () => void; onCreate: (
   </div>;
 }
 
-function TournamentPage({ bundle, isOwner, busy, onBack, onStatus, onScore, onDelete, onFinalize, onPlayoffScore }: {
+function TournamentPage({ bundle, isOwner, busy, onBack, onStatus, onScore, onDelete, onFinalize, onPlayoffScore, onSelectDivision, onAddDivision }: {
   bundle: TournamentBundle; isOwner: boolean; busy: boolean; onBack: () => void;
   onStatus: (next: 'published'|'pool_play') => Promise<void>; onScore: (match: Match, scores: Array<[number,number]>) => Promise<void>;
   onDelete: () => Promise<void>;
-  onFinalize: (assignments: BracketAssignments, rules: RoundRulesByBracket) => Promise<void>;
+  onSelectDivision: (divisionId:string)=>void; onAddDivision:()=>void;
+  onFinalize: (assignments: BracketAssignments, rules: RoundRulesByBracket, noByes: boolean) => Promise<void>;
   onPlayoffScore: (match: PlayoffMatch, scores: SetScore[]) => Promise<void>;
 }) {
   const [tab, setTab] = useState<DetailTab>('overview');
@@ -553,7 +594,7 @@ function TournamentPage({ bundle, isOwner, busy, onBack, onStatus, onScore, onDe
   const complete = bundle.matches.filter(m => m.status === 'completed').length;
   const scheduled = bundle.matches.length;
   const teamName = (id: string) => bundle.teams.find(x => x.id === id)?.name ?? 'Unknown team';
-  const shareUrl = `${window.location.origin}${window.location.pathname}?t=${encodeURIComponent(t.id)}`;
+  const shareUrl = `${window.location.origin}${window.location.pathname}?t=${encodeURIComponent(t.id)}${bundle.selectedCompetitionDivisionId?`&d=${encodeURIComponent(bundle.selectedCompetitionDivisionId)}`:''}`;
   const publicReady = t.status !== 'draft';
   const firstPool = bundle.pools.some(p => p.id === activePool) ? activePool : bundle.pools[0]?.id;
   return <div className="page-enter"><button className="back-button" onClick={onBack}><ArrowLeft size={16}/> All tournaments</button>
@@ -563,6 +604,17 @@ function TournamentPage({ bundle, isOwner, busy, onBack, onStatus, onScore, onDe
         {isOwner && t.status === 'draft' && <button className="button button-primary" disabled={busy} onClick={() => onStatus('published')}><ExternalLink size={16}/> Publish tournament</button>}
         {isOwner && t.status === 'published' && <button className="button button-primary" disabled={busy} onClick={() => onStatus('pool_play')}><Flag size={16}/> Start pool play</button>}
       </div></div>
+    <section className="division-toolbar white-card" aria-label="Competition divisions">
+      <div className="division-toolbar-heading"><strong>Competition divisions</strong>
+        <span>Custom divisions have independent pools, scores, standings and playoffs.</span></div>
+      <div className="division-tabs">
+        {(bundle.competitionDivisions??[{id:bundle.selectedCompetitionDivisionId??'local',name:bundle.competitionDivisionName??'Open',status:t.status,sort_order:0,tournament_id:t.id}]).map(d=><button
+          key={d.id} type="button" className={d.id===bundle.selectedCompetitionDivisionId?'active':''}
+          aria-current={d.id===bundle.selectedCompetitionDivisionId?'page':undefined}
+          onClick={()=>onSelectDivision(d.id)}>{d.name}</button>)}
+        {isOwner && t.status==='draft' && !demoMode && <button type="button" className="division-add" onClick={onAddDivision}><Plus size={16}/> Add division</button>}
+      </div>
+    </section>
     {demoMode && <div className="demo-banner"><LockKeyhole size={17}/><span>Demo mode: your tournament is saved in this browser only. Public links and multi-device access require a connected Supabase project.</span></div>}
     <div className="detail-metrics"><Metric icon={<UsersRound size={20}/>} label="Teams" value={String(bundle.teams.length)} hint="Registered"/><Metric icon={<ListChecks size={20}/>} label="Pool matchups" value={String(scheduled)} hint={`${scheduled*t.pool_sets} scheduled sets`}/><Metric icon={<CheckCircle2 size={20}/>} label="Results entered" value={`${complete}/${scheduled}`} hint={`${scheduled ? Math.round(100*complete/scheduled) : 0}% completed`}/></div>
     <div className="tabs" role="tablist" aria-label="Tournament sections">{([['overview','Overview'],['pools','Pool play & scores'],['playoffs','Playoffs']] as const).map(([key,label]) => <button key={key} role="tab" aria-selected={tab===key} className={tab===key?'active':''} onClick={()=>setTab(key)}>{label}</button>)}</div>
@@ -575,7 +627,7 @@ function TournamentPage({ bundle, isOwner, busy, onBack, onStatus, onScore, onDe
       </div></div>}
     {tab === 'pools' && <div className="pool-play-area"><div className="pool-switcher">{bundle.pools.map(pool => <button key={pool.id} className={firstPool===pool.id?'active':''} onClick={()=>setActivePool(pool.id)}>{pool.label}</button>)}</div>
       {bundle.pools.filter(p=>p.id===firstPool).map(pool => <PoolPanel key={pool.id} pool={pool} bundle={bundle} isOwner={isOwner} teamName={teamName} onEdit={setEditingMatch}/>)}</div>}
-    {tab === 'playoffs' && <PlayoffPanel key={bundle.tournament.id} bundle={bundle}
+    {tab === 'playoffs' && <PlayoffPanel key={`${bundle.tournament.id}:${bundle.selectedCompetitionDivisionId??''}`} bundle={bundle}
       isOwner={isOwner} busy={busy} onFinalize={onFinalize}
       onPlayoffScore={onPlayoffScore}/>}
     {isOwner && tab === 'overview' && <div className="tournament-delete-area">
@@ -609,14 +661,13 @@ type DiagramRound = {
   cards: DiagramCard[];
 };
 
-function EliminationBracket({ label, rounds }: { label: string; rounds: DiagramRound[] }) {
+function EliminationBracket({ label, rounds, cardHeight = 154 }: { label: string; rounds: DiagramRound[]; cardHeight?: number }) {
   if (!rounds.length) return null;
 
   // Consistent dimensions keep every connector anchored to a match midpoint.
   const cardWidth = 264;
-  const cardHeight = 154;
   const gapWidth = 78;
-  const rowPitch = 178;
+  const rowPitch = cardHeight + 24;
   const titleHeight = 48;
   const firstRoundCount = Math.max(1, rounds[0].cards.length);
   const width = rounds.length * cardWidth + (rounds.length - 1) * gapWidth;
@@ -670,17 +721,128 @@ function EliminationBracket({ label, rounds }: { label: string; rounds: DiagramR
 }
 
 /**
+ * Double-elimination display: two complete HORIZONTAL round trees and one
+ * championship panel. The lower path alternates between receiving winners from
+ * the preceding losers' round and teams dropping from the upper bracket.
+ * The diagram is display-only: Supabase owns actual match progression.
+ */
+function DoubleEliminationMatches({bracketName,matches,bundle,teamName,busy,isOwner,onEnter}:{
+  bracketName:string;matches:PlayoffMatch[];bundle:TournamentBundle;
+  teamName:(id:string|null)=>string;busy:boolean;isOwner:boolean;onEnter:(match:PlayoffMatch)=>void;
+}) {
+  const scoreCard = (match:PlayoffMatch): React.ReactNode => {
+    const allScores=(bundle.playoffScores??[]).filter(s=>s.match_id===match.id);
+    const winsA=allScores.filter(s=>s.score_a>s.score_b).length;
+    const winsB=allScores.filter(s=>s.score_b>s.score_a).length;
+    const rule=effectiveRoundRule(bundle,match.bracket_id,match.round_number);
+    const ready=match.status==='scheduled' && !!match.team_a_id && !!match.team_b_id
+      && bundle.tournament.status==='playoffs';
+    const label=match.playoff_phase==='grand'?'Grand Final 1'
+      :match.playoff_phase==='reset'?'Grand Final 2 (if needed)'
+      :`Match ${match.playoff_phase==='lower'?match.sequence%100:match.sequence}`;
+    return <>
+      <div className="double-match-label">{label}</div>
+      <div className={`bracket-team ${winsA>winsB?'bracket-team--winner':''}`}>
+        <span>{teamName(match.team_a_id)}</span><strong>{allScores.length?winsA:''}</strong>
+      </div>
+      <div className={`bracket-team ${winsB>winsA?'bracket-team--winner':''}`}>
+        <span>{teamName(match.team_b_id)}</span><strong>{allScores.length?winsB:''}</strong>
+      </div>
+      <small className="bracket-match-status">{match.status==='completed'
+        ? `${rule.best_of===1?'Single set':`Best of ${rule.best_of}`} · ${allScores.map(s=>`${s.score_a}–${s.score_b}`).join(' / ')}`
+        :match.status==='bye'?'Automatic bye · no score required'
+        :ready?`${rule.best_of===1?'Single set':`Best of ${rule.best_of}`} · Ready for score`:'Waiting for previous results'}</small>
+      {(ready || (isOwner && match.status==='completed')) &&
+        <button className="score-action" type="button" disabled={busy}
+          onClick={()=>onEnter(match)}>{match.status==='completed'?'Edit score':'Enter score'} <ChevronRight size={14}/></button>}
+    </>;
+  };
+  const upper=matches.filter(m=>(m.playoff_phase??'upper')==='upper');
+  const upperRounds=[...new Set(upper.map(m=>m.round_number))].sort((a,b)=>a-b).map(n=>({
+    number:n,
+    cards:upper.filter(m=>m.round_number===n).sort((a,b)=>a.sequence-b.sequence).map(m=>({
+      id:m.id,content:scoreCard(m),state:m.status==='scheduled'&&m.team_a_id&&m.team_b_id?'ready' as const:m.status==='forfeit'?'scheduled' as const:m.status,
+    })),
+  }));
+  const lower=matches.filter(m=>m.playoff_phase==='lower');
+  const lowerStages=[...new Set(lower.map(m=>Math.floor(m.sequence/100)))].sort((a,b)=>a-b);
+  const lowerRounds=lowerStages.map(n=>({
+    number:n,
+    matches:lower.filter(m=>Math.floor(m.sequence/100)===n).sort((a,b)=>a.sequence-b.sequence),
+  }));
+  const finals=matches.filter(m=>m.playoff_phase==='grand'||m.playoff_phase==='reset')
+    .sort((a,b)=>a.playoff_phase==='grand'?-1:b.playoff_phase==='grand'?1:0);
+  const cardWidth=270, cardHeight=196, gapWidth=65, pitch=220, heading=56;
+  const mostMatches=Math.max(1,...lowerRounds.map(r=>r.matches.length));
+  const width=lowerRounds.length*cardWidth+Math.max(0,lowerRounds.length-1)*gapWidth;
+  const height=heading+mostMatches*pitch;
+  const center=(roundIndex:number,matchIndex:number) =>
+    heading+(matchIndex+0.5)*mostMatches*pitch/lowerRounds[roundIndex].matches.length;
+  const connections=lowerRounds.slice(0,-1).flatMap((round,i)=>{
+    const following=lowerRounds[i+1];
+    const count=round.matches.length;
+    const nextCount=following.matches.length;
+    if (count!==nextCount && count!==nextCount*2) return [];
+    const sx=i*(cardWidth+gapWidth)+cardWidth;
+    const elbowX=sx+gapWidth/2;
+    const dx=sx+gapWidth;
+    return round.matches.map((m,j)=>{
+      const targetIndex=count===nextCount?j:Math.floor(j/2);
+      const a=center(i,j), b=center(i+1,targetIndex);
+      return {key:m.id,d:`M ${sx} ${a} H ${elbowX} V ${b} H ${dx}`};
+    });
+  });
+  return <div className="double-bracket-board" aria-label={`${bracketName} double-elimination bracket`}>
+    <section className="double-bracket-section">
+      <h3>Winners' bracket</h3>
+      <p>Winners move right. The first loss drops a team into the losers' bracket.</p>
+      <EliminationBracket label={`${bracketName} winners' bracket`} rounds={upperRounds} cardHeight={196}/>
+    </section>
+    {lowerRounds.length>0 && <section className="double-bracket-section">
+      <h3>Losers' bracket</h3>
+      <p>Rounds progress left to right. A second loss eliminates a team; teams from the winners' bracket join at designated rounds.</p>
+      <div className="bracket-scroll" role="region" tabIndex={0} aria-label={`${bracketName} losers' bracket`}>
+        <div className="lower-bracket-tree" style={{width,height}}>
+          <svg className="bracket-connectors" width={width} height={height} viewBox={`0 0 ${width} ${height}`} aria-hidden="true">
+            {connections.map(c=><path key={c.key} d={c.d}/>)}
+          </svg>
+          {lowerRounds.map((round,i)=><section className="bracket-column" key={round.number}
+            aria-label={`Losers' round ${round.number}`} style={{left:i*(cardWidth+gapWidth),width:cardWidth}}>
+            <h3>Losers' round {round.number}</h3>
+            {round.matches.map((m,j)=><div key={m.id}
+              className={`bracket-match bracket-match--${m.status}`}
+              style={{top:center(i,j)-cardHeight/2,height:cardHeight}}>{scoreCard(m)}</div>)}
+          </section>)}
+        </div>
+      </div>
+    </section>}
+    <section className="double-bracket-section">
+      <h3>Championship</h3>
+      <p>The undefeated finalist faces the survivor of the losers' bracket. Grand Final 2 is played only if the losers' bracket finalist wins Grand Final 1.</p>
+      <div className="double-finals">
+        {finals.map(m=><div className="bracket-match" key={m.id}>{scoreCard(m)}</div>)}
+        {!finals.length && <p>The championship match will appear when the bracket is generated.</p>}
+      </div>
+    </section>
+  </div>;
+}
+
+/**
  * The organizer reviews every pool result and explicitly approves the final
  * participants and seeds. Until confirmation, all assignments are local-only.
  * The SQL RPC rechecks ownership, all results, and all team IDs atomically.
  */
 function PlayoffPanel({ bundle, isOwner, busy, onFinalize, onPlayoffScore }: {
   bundle: TournamentBundle; isOwner: boolean; busy: boolean;
-  onFinalize: (assignments: BracketAssignments, rules: RoundRulesByBracket) => Promise<void>;
+  onFinalize: (assignments: BracketAssignments, rules: RoundRulesByBracket, noByes: boolean) => Promise<void>;
   onPlayoffScore: (match: PlayoffMatch, scores: SetScore[]) => Promise<void>;
 }) {
   const [assignments, setAssignments] = useState<BracketAssignments>(() => suggestedAssignments(bundle));
+  const [qualification, setQualification] = useState<QualificationRule>({
+    mode:'all', topPerPool:2, nextPlaceWildcards:0, overallCount:8,
+  });
   const [confirmed, setConfirmed] = useState(false);
+  const [requireByeFree, setRequireByeFree] = useState(false);
   const [editedRoundRules, setEditedRoundRules] = useState<Record<string,Record<number,PlayoffRoundRule>>>({});
   const getRule = (bracketId:string, round:number): PlayoffRoundRule => editedRoundRules[bracketId]?.[round]
     ?? effectiveRoundRule(bundle,bracketId,round);
@@ -692,7 +854,7 @@ function PlayoffPanel({ bundle, isOwner, busy, onFinalize, onPlayoffScore }: {
     }));
   };
   const buildRules = (): RoundRulesByBracket => Object.fromEntries(
-    bundle.divisions.map(bracket=>[bracket.id,Array.from({length:Math.ceil(Math.log2((assignments[bracket.id]??[]).length))},
+    bundle.divisions.map(bracket=>[bracket.id,Array.from({length:playoffRoundCount((assignments[bracket.id]??[]).length,bracket.format)},
       (_,i)=>getRule(bracket.id,i+1))]),
   );
   const [activeMatch, setActiveMatch] = useState<PlayoffMatch | null>(null);
@@ -705,7 +867,8 @@ function PlayoffPanel({ bundle, isOwner, busy, onFinalize, onPlayoffScore }: {
     ? bundle.teams.find(team => team.id === id)?.name ?? 'Unknown team'
     : 'TBD';
   const brackets = [...bundle.divisions].sort((a,b)=>a.sort_order-b.sort_order);
-  const assignmentError = validateAssignments(bundle, assignments);
+  const assignmentError = validateAssignments(bundle, assignments)
+    || (requireByeFree ? byeFreeAssignmentsError(bundle, assignments) : null);
   const scoringError = Object.values(buildRules()).flat().map(roundRuleError).find(Boolean);
   const canFinalize = isOwner && !demoMode && t.status === 'pool_play'
     && allComplete && !assignmentError && !scoringError && confirmed && !busy;
@@ -718,6 +881,31 @@ function PlayoffPanel({ bundle, isOwner, busy, onFinalize, onPlayoffScore }: {
       [fromId]: old[fromId].filter(id => id !== teamId),
       [toId]: [...old[toId],teamId],
     }));
+  };
+  const byeSuggestion = suggestedByeFreeWildcards(bundle, qualification.topPerPool);
+  const applyQualification = () => {
+    const adjusted = requireByeFree && qualification.mode==='per_pool' && byeSuggestion.possible
+      ? {...qualification, nextPlaceWildcards:byeSuggestion.count}
+      : qualification;
+    if (requireByeFree && qualification.mode==='per_pool' && !byeSuggestion.possible) {
+      setSaveError('Not enough next-place teams to fill a bracket without byes. Change automatic qualifiers, bracket count, or allow byes.');
+      return;
+    }
+    setQualification(adjusted);
+    const selected=qualifiedTeamIds(bundle, adjusted);
+    setAssignments(distributeQualifiers(bundle,selected));
+    setConfirmed(false);
+  };
+  const selectedIds=new Set(Object.values(assignments).flat());
+  const excludedTeams=rankedPoolTeams(bundle).filter(id=>!selectedIds.has(id));
+  const pendingQualifiers=qualifiedTeamIds(bundle,qualification);
+  const restoreExcluded=(teamId:string,bracketId:string) => {
+    setConfirmed(false);
+    setAssignments(old=>({...old,[bracketId]:[...(old[bracketId]??[]),teamId]}));
+  };
+  const excludeTeam=(teamId:string,bracketId:string) => {
+    setConfirmed(false);
+    setAssignments(old=>({...old,[bracketId]:(old[bracketId]??[]).filter(id=>id!==teamId)}));
   };
   const reorder = (bracketId: string, index: number, direction: number) => {
     setConfirmed(false);
@@ -736,7 +924,7 @@ function PlayoffPanel({ bundle, isOwner, busy, onFinalize, onPlayoffScore }: {
       ? `Finalize all pool results and generate ${brackets.length} playoff bracket(s)?\n\nPool scores will lock. Playoff seeding cannot be changed once matches begin.`
       : 'Approve final pool standings and complete this pool-only tournament? Pool scores will lock.';
     if (!window.confirm(message)) return;
-    try { await onFinalize(assignments,buildRules()); }
+    try { await onFinalize(assignments,buildRules(),requireByeFree); }
     catch (error) { setSaveError(error instanceof Error ? error.message : String(error)); }
   };
 
@@ -759,6 +947,66 @@ function PlayoffPanel({ bundle, isOwner, busy, onFinalize, onPlayoffScore }: {
       </div>
     </div>
 
+    {!running && isOwner && brackets.length>0 && <div className="white-card playoff-review-card">
+      <div className="card-heading"><h2>Who qualifies for playoffs?</h2>
+        <span className="subtle-tag">{selectedIds.size} of {bundle.teams.length} currently selected</span></div>
+      <p className="review-format-note">Choose how teams qualify after pool play. You can then adjust bracket assignments and seeds manually. Non-qualifying teams keep their pool results but do not enter playoffs.</p>
+      <div className="qualification-controls">
+        <label>Qualification method
+          <select value={qualification.mode} onChange={e=>setQualification(old=>({...old,mode:e.target.value as QualificationRule['mode']}))}>
+            <option value="all">Everyone advances (default)</option>
+            <option value="per_pool">Top teams from each pool + wildcards</option>
+            <option value="overall">Best X teams overall</option>
+          </select>
+        </label>
+        {qualification.mode==='per_pool' && <>
+          <label>Automatic places per pool
+            <input type="number" min="0" max={Math.max(1,...bundle.pools.map(p=>standingsForPool(bundle,p.id).length))}
+              value={qualification.topPerPool} onChange={e=>setQualification(old=>({...old,topPerPool:Math.max(0,Number(e.target.value))}))}/>
+          </label>
+          <label>Best next-place wildcards
+            <input type="number" min="0" max={bundle.pools.length} value={qualification.nextPlaceWildcards}
+              onChange={e=>setQualification(old=>({...old,nextPlaceWildcards:Math.max(0,Number(e.target.value))}))}/>
+          </label>
+        </>}
+        {qualification.mode==='overall' && <label>Total teams advancing
+          <input type="number" min="2" max={bundle.teams.length} value={qualification.overallCount}
+            onChange={e=>setQualification(old=>({...old,overallCount:Math.max(0,Number(e.target.value))}))}/>
+        </label>}
+      </div>
+      <label className="checkbox-row qualifier-no-byes"><input type="checkbox" checked={requireByeFree}
+        onChange={e=>{setRequireByeFree(e.target.checked);setConfirmed(false);}} />
+        <span><strong>Require full playoff brackets (no first-round byes)</strong></span>
+      </label>
+      {requireByeFree && qualification.mode==='per_pool' && <p className="review-format-note">
+        {byeSuggestion.possible
+          ? `To fill ${bundle.divisions.length} bracket(s) with ${byeSuggestion.target} total entrants, select ${byeSuggestion.count} best next-place wildcard team(s). This count will be applied automatically.`
+          : `A full bracket would require ${byeSuggestion.count} wildcard(s), but only ${byeSuggestion.available} next-place teams are available. Change the cutoff or allow byes.`}
+      </p>}
+      {requireByeFree && qualification.mode!=='per_pool' && <p className="review-format-note">
+        Each configured playoff bracket must contain 2, 4, 8, 16, 32 or 64 entrants. Adjust the cutoff or manual seeds to meet this requirement.
+      </p>}
+      <div className="qualifier-actions">
+        <span>{pendingQualifiers.length} would advance based on this rule.</span>
+        <button className="button button-outline" type="button" onClick={applyQualification}>
+          Apply qualifiers to playoff brackets
+        </button>
+      </div>
+      {qualification.mode==='per_pool' && <p className="review-format-note">
+        Example: Top 2 per pool + 2 wildcards means automatic 1st/2nd-place qualifiers, plus the two best 3rd-place teams. Wildcards are compared by set-win percentage, point ratio, then average point difference. Review ties across uneven pools before finalizing.
+      </p>}
+      {!!excludedTeams.length && <div className="excluded-teams">
+        <h3>Not advancing ({excludedTeams.length})</h3>
+        {excludedTeams.map(id=><div key={id} className="excluded-team"><span>{teamName(id)}</span>
+          <select aria-label={`Restore ${teamName(id)} to playoffs`} value=""
+            onChange={e=>{if(e.target.value) restoreExcluded(id,e.target.value);}}>
+            <option value="">Add to bracket…</option>
+            {brackets.map(bracket=><option key={bracket.id} value={bracket.id}>{bracket.name}</option>)}
+          </select>
+        </div>)}
+      </div>}
+    </div>}
+
     {!running && brackets.length===0 && <div className="white-card playoff-review-card">
       <h2>Pool play only</h2>
       <p className="review-format-note">No playoff brackets were configured. Once every result is correct, the organizer can confirm final standings and complete the tournament.</p>
@@ -766,14 +1014,14 @@ function PlayoffPanel({ bundle, isOwner, busy, onFinalize, onPlayoffScore }: {
 
     {!running && brackets.map(bracket => {
       const ids = assignments[bracket.id] ?? [];
-      const preview = bracket.format === 'single' && ids.length >= 2
+      const preview = ids.length >= 2
         ? previewSingleElimination(ids) : [];
       return <div className="white-card playoff-review-card" key={bracket.id}>
         <div className="card-heading"><div><h2>{bracket.name} bracket</h2>
-          <p className="section-desc">{bracket.format === 'single' ? 'Single elimination' : 'Double elimination (next milestone)'}</p></div>
+          <p className="section-desc">{bracket.format === 'single' ? 'Single elimination' : 'Double elimination · 2–64 teams'}</p></div>
           <span className="subtle-tag">{ids.length} teams</span></div>
         {isOwner && !demoMode && t.status === 'pool_play' && <div className="seeding-list">
-          <p className="review-format-note">Choose the bracket for each team and use arrows to adjust the seed order. Seed 1 is highest.</p>
+          <p className="review-format-note">Choose brackets for advancing teams, use arrows to adjust seeding, or × to exclude a team. Seed 1 is highest.</p>
           {ids.map((id,index) => <div className="seeding-row" key={id}>
             <strong>#{index+1} · {teamName(id)}</strong>
             <div className="seed-actions">
@@ -785,17 +1033,25 @@ function PlayoffPanel({ bundle, isOwner, busy, onFinalize, onPlayoffScore }: {
                 onClick={()=>reorder(bracket.id,index,-1)}>↑</button>
               <button type="button" aria-label={`Move ${teamName(id)} down`} disabled={index===ids.length-1}
                 onClick={()=>reorder(bracket.id,index,1)}>↓</button>
+              <button type="button" className="exclude-seed" aria-label={`Exclude ${teamName(id)} from playoffs`}
+                title="Does not advance to playoffs" onClick={()=>excludeTeam(id,bracket.id)}>×</button>
             </div>
           </div>)}
         </div>}
-        {isOwner && !running && bracket.format==='single' && ids.length>=2 && <div className="round-scoring-settings">
+        {isOwner && !running && ids.length>=2 && <div className="round-scoring-settings">
           <h3>Scoring by playoff round</h3>
-          <p className="review-format-note">Each round can use one set, best of three, or best of five. Deciding-set rules apply only to the last possible set.</p>
-          {Array.from({length:Math.ceil(Math.log2(ids.length))},(_,i)=>i+1).map(round=>{
+          <p className="review-format-note">Each round can use one set, best of three, or best of five. Deciding-set rules apply only to the last possible set. In double elimination, losers' rounds inherit their corresponding winners' round settings.</p>
+          {Array.from({length:playoffRoundCount(ids.length,bracket.format)},(_,i)=>i+1).map(round=>{
             const rule=getRule(bracket.id,round);
-            const totalRounds=Math.ceil(Math.log2(ids.length));
+            const totalRounds=playoffRoundCount(ids.length,bracket.format);
+            const upperRounds=totalRounds-2;
+            const roundLabel=bracket.format==='double'
+              ? round===upperRounds+1?'Grand Final 1'
+                : round===upperRounds+2?'Grand Final 2 (if needed)'
+                : `Winners round ${round} · corresponding losers rounds`
+              : round===totalRounds?'Final':round===totalRounds-1?'Semifinals':`Round ${round}`;
             return <div className="round-scoring-row" key={round}>
-              <div className="round-scoring-head"><strong>{round===totalRounds?'Final':round===totalRounds-1?'Semifinals':`Round ${round}`}</strong>
+              <div className="round-scoring-head"><strong>{roundLabel}</strong>
                 <select aria-label={`${bracket.name} round ${round} match format`} value={rule.best_of}
                   onChange={e=>changeRoundRule(bracket.id,round,{best_of:Number(e.target.value) as 1|3|5})}>
                   <option value={1}>Single set</option><option value={3}>Best of 3</option><option value={5}>Best of 5</option>
@@ -820,8 +1076,8 @@ function PlayoffPanel({ bundle, isOwner, busy, onFinalize, onPlayoffScore }: {
             </div>;
           })}
         </div>}
-        {bracket.format === 'single' && !!preview.length && <EliminationBracket
-          label={`${bracket.name} bracket preview`}
+        {!!preview.length && <EliminationBracket
+          label={`${bracket.name} ${bracket.format==='double'?'upper bracket':'bracket'} preview`}
           rounds={Array.from(new Set(preview.map(match => match.round))).map(round => ({
             number: round,
             cards: preview.filter(match => match.round === round).map(match => ({
@@ -843,13 +1099,13 @@ function PlayoffPanel({ bundle, isOwner, busy, onFinalize, onPlayoffScore }: {
               state: match.round === 1 && (!match.teamA || !match.teamB) ? 'bye' as const : 'scheduled' as const,
             })),
           }))}/>}
-        {bracket.format==='double' && <p className="review-format-note">This bracket is saved as a plan. Double-elimination generation is intentionally disabled until that engine is tested.</p>}
+        {bracket.format==='double' && <p className="review-format-note">Double elimination supports 2–64 teams, including seeded byes. Each team is eliminated after its second loss. A second grand final may be required if enabled. This preview shows the winners' bracket; the losers' bracket is built on finalization.</p>}
       </div>;
     })}
 
     {!running && isOwner && <div className="white-card playoff-approval">
       <h2>Approve pool results</h2>
-      <p className="review-format-note">Check all scores and final standings first. Pool results will be locked after finalization. Public visitors cannot generate brackets.</p>
+      <p className="review-format-note">Check all scores, qualified teams, and final standings first. Pool results will be locked after finalization. Public visitors cannot generate brackets.</p>
       {assignmentError && <p className="form-error" role="alert">{assignmentError}</p>}
       {scoringError && <p className="form-error" role="alert">Playoff scoring: {scoringError}</p>}
       {!allComplete && <p className="form-error">{bundle.matches.length - complete} pool matches still need a result.</p>}
@@ -869,14 +1125,18 @@ function PlayoffPanel({ bundle, isOwner, busy, onFinalize, onPlayoffScore }: {
       const championScores = (bundle.playoffScores??[]).filter(s=>s.match_id===championMatch?.id);
       const championWinsA=championScores.filter(s=>s.score_a>s.score_b).length;
       const championWinsB=championScores.filter(s=>s.score_b>s.score_a).length;
-      const champion = championMatch && championMatch.status==='completed' && championScores.length
-        ? teamName(championWinsA>championWinsB?championMatch.team_a_id:championMatch.team_b_id)
-        : null;
+      const champion = bracket.format==='double'
+        ? (bracket.champion_team_id ? teamName(bracket.champion_team_id) : null)
+        : championMatch && championMatch.status==='completed' && championScores.length
+          ? teamName(championWinsA>championWinsB?championMatch.team_a_id:championMatch.team_b_id)
+          : null;
       return <div className="white-card playoff-review-card" key={bracket.id}>
         <div className="card-heading"><div><h2>{bracket.name} bracket</h2>
           <p className="section-desc">{bracket.format === 'single' ? 'Single elimination' : 'Double elimination'}</p></div>
           <span className="subtle-tag">{champion ? `Champion: ${champion}` : bracket.status ?? 'Active'}</span></div>
-        <EliminationBracket
+        {bracket.format==='double' ? <DoubleEliminationMatches
+          bracketName={bracket.name} matches={matches} bundle={bundle} teamName={teamName}
+          busy={busy} isOwner={isOwner} onEnter={setActiveMatch}/> : <EliminationBracket
           label={`${bracket.name} active playoff bracket`}
           rounds={Array.from(new Set(matches.map(match => match.round_number))).map(round => ({
             number: round,
@@ -908,7 +1168,7 @@ function PlayoffPanel({ bundle, isOwner, busy, onFinalize, onPlayoffScore }: {
                       ? `${rule.best_of===1?'Single set':`Best of ${rule.best_of}`} · ${allScores.map(s=>`${s.score_a}–${s.score_b}`).join(' / ')}`
                       : ready ? `${rule.best_of===1?'Single set':`Best of ${rule.best_of}`} · Ready for score`
                       : 'Awaiting previous winners'}</small>
-                  {(ready || (isOwner && match.status === 'completed')) &&
+                  {(ready || (isOwner && bracket.format==='single' && match.status === 'completed')) &&
                     <button className="score-action" type="button" disabled={busy}
                       onClick={() => setActiveMatch(match)}>
                       {match.status === 'completed' ? 'Edit score' : 'Enter score'} <ChevronRight size={14}/>
@@ -916,7 +1176,7 @@ function PlayoffPanel({ bundle, isOwner, busy, onFinalize, onPlayoffScore }: {
                 </>,
               };
             }),
-          }))}/>
+          }))}/>}
 
       </div>;
     })}

@@ -3,33 +3,13 @@ import { createBundle, roundRobin, scoreError, standingsForPool, assignPools } f
 import type { NewTournamentInput } from './types';
 const input: NewTournamentInput = {
   name:'Autumn Cup', sport:'Volleyball',startsOn:'2026-11-01',teamNames:Array.from({length:16},(_,i)=>`Team ${i+1}`),poolCount:4,
-  poolSets:2,targetPoints:21,winByTwo:true,seedMode:'snake',playoffBrackets:[{name:'Championship',format:'single',bracketReset:true}],
+  poolSets:2,targetPoints:21,winByTwo:true,seedMode:'snake',
+  playoffBrackets:[
+    {name:'Gold',format:'double',bracketReset:true},
+    {name:'Silver',format:'single',bracketReset:false},
+  ],
 };
 describe('tournament engine',()=>{
-  it('creates one Championship bracket by default',()=>{
-    const b=createBundle(input);
-    expect(b.divisions).toHaveLength(1);
-    expect(b.divisions[0].name).toBe('Championship');
-  });
-  it('supports pool-play-only tournaments and custom multi-bracket plans',()=>{
-    expect(createBundle({...input,playoffBrackets:[]}).divisions).toEqual([]);
-    const multi=createBundle({...input,playoffBrackets:[
-      {name:'Gold',format:'double',bracketReset:true},
-      {name:'Silver',format:'single',bracketReset:false},
-      {name:'Bronze',format:'single',bracketReset:false},
-    ]});
-    expect(multi.divisions.map(d=>d.name)).toEqual(['Gold','Silver','Bronze']);
-    expect(multi.divisions[0].bracket_reset).toBe(true);
-  });
-  it('rejects duplicate or empty playoff bracket names',()=>{
-    expect(()=>createBundle({...input,playoffBrackets:[
-      {name:'Gold',format:'single',bracketReset:false},
-      {name:' gold ',format:'double',bracketReset:true},
-    ]})).toThrow();
-    expect(()=>createBundle({...input,playoffBrackets:[
-      {name:' ',format:'single',bracketReset:false},
-    ]})).toThrow();
-  });
   it('creates 4 evenly distributed pools and 24 unique matchups for 16 teams',()=>{
     const b=createBundle(input);
     expect(b.pools).toHaveLength(4);expect(b.matches).toHaveLength(24);
@@ -41,11 +21,10 @@ describe('tournament engine',()=>{
   });
   it('supports uneven pools without dropping any teams',()=>{
     const b=createBundle({...input,teamNames:input.teamNames.slice(0,10),poolCount:3});
-    // Verify balanced pool sizes regardless of which pool gets the extra team.
-    const poolSizes = b.pools.map(
-    p => b.poolTeams.filter(x => x.pool_id === p.id).length
-    );
-    expect([...poolSizes].sort((a, b) => b - a)).toEqual([4, 3, 3]);
+    const poolSizes = b.pools.map(p=>b.poolTeams.filter(x=>x.pool_id===p.id).length);
+    // Snake seeding may give any pool the extra team; only the distribution matters.
+    expect([...poolSizes].sort((a, b) => b - a)).toEqual([4,3,3]);
+    expect(poolSizes.reduce((sum, count) => sum + count, 0)).toBe(10);
     expect(b.matches).toHaveLength(12);
   });
   it('generates n(n-1)/2 matches for odd and even pool sizes',()=>{

@@ -31,8 +31,8 @@ describe('single elimination', () => {
     assign[b.divisions[0].id][0] = assign[b.divisions[1].id][0];
     expect(validateAssignments(b, assign)).not.toBeNull();
   });
-  it('blocks double-elimination for this milestone, rather than misbuilding it',()=>{
+  it('accepts valid double-elimination assignments',()=>{
     const b = createBundle({...base,playoffBrackets:[{name:'Gold',format:'double',bracketReset:true}]});
-    expect(validateAssignments(b,suggestedAssignments(b))).toMatch(/Double-elimination/);
+    expect(validateAssignments(b,suggestedAssignments(b))).toBeNull();
   });
 });
