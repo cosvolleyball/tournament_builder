@@ -867,7 +867,7 @@ function DoubleEliminationMatches({bracketName,matches,bundle,teamName,busy,isOw
     </section>}
     <section className="double-bracket-section">
       <h3>Championship</h3>
-      <p>The undefeated finalist faces the survivor of the losers' bracket. Grand Final 2 is played only if the losers' bracket finalist wins Grand Final 1.</p>
+      <p>The undefeated finalist faces the survivor of the losers' bracket.</p>
       <div className="double-finals">
         {finals.map(m=><div className="bracket-match" key={m.id}>{scoreCard(m)}</div>)}
         {!finals.length && <p>The championship match will appear when the bracket is generated.</p>}
