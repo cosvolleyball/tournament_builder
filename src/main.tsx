@@ -643,6 +643,31 @@ function TournamentPage({ bundle, isOwner, busy, onBack, onStatus, onScore, onDe
   const complete = bundle.matches.filter(m => m.status === 'completed').length;
   const scheduled = bundle.matches.length;
   const teamName = (id: string) => bundle.teams.find(x => x.id === id)?.name ?? 'Unknown team';
+
+  // The overview is a live summary of the selected competition division.
+  // A planned bracket's metadata exists from tournament creation, but its
+  // status changes to active/completed as scores are entered in Supabase.
+  const poolsComplete = scheduled > 0 && complete === scheduled;
+  const allBracketsComplete = bundle.divisions.length > 0 && bundle.divisions.every(
+    bracket => bracket.status === 'completed' || Boolean(bracket.champion_team_id),
+  );
+  const competitionComplete = t.status === 'completed' || (poolsComplete && allBracketsComplete);
+  const structureStatus = competitionComplete ? 'Completed'
+    : t.status === 'playoffs' ? 'Playoffs underway'
+    : poolsComplete ? 'Pool play complete'
+    : t.status === 'pool_play' ? 'Pool play underway'
+    : t.status === 'draft' ? 'Draft' : 'Published';
+  const structureDescription = competitionComplete
+    ? bundle.divisions.length > 0
+      ? 'Pool play and playoffs have concluded for this division.'
+      : 'Pool play has concluded for this division.'
+    : t.status === 'playoffs'
+      ? 'Pool play is complete. Playoff brackets are now underway.'
+      : poolsComplete
+        ? 'All pool matches are complete. The playoff brackets have not started yet.'
+        : t.status === 'pool_play'
+          ? 'Pool play is underway. Results will update as matches finish.'
+          : 'Your round-robin schedule is ready for competition.';
   const shareUrl = `${window.location.origin}${window.location.pathname}?t=${encodeURIComponent(t.id)}${bundle.selectedCompetitionDivisionId?`&d=${encodeURIComponent(bundle.selectedCompetitionDivisionId)}`:''}`;
   const publicReady = t.status !== 'draft';
   const firstPool = bundle.pools.some(p => p.id === activePool) ? activePool : bundle.pools[0]?.id;
@@ -667,10 +692,23 @@ function TournamentPage({ bundle, isOwner, busy, onBack, onStatus, onScore, onDe
     {demoMode && <div className="demo-banner"><LockKeyhole size={17}/><span>Demo mode: your tournament is saved in this browser only. Public links and multi-device access require a connected Supabase project.</span></div>}
     <div className="detail-metrics"><Metric icon={<UsersRound size={20}/>} label="Teams" value={String(bundle.teams.length)} hint="Registered"/><Metric icon={<ListChecks size={20}/>} label="Pool matchups" value={String(scheduled)} hint={`${scheduled*t.pool_sets} scheduled sets`}/><Metric icon={<CheckCircle2 size={20}/>} label="Results entered" value={`${complete}/${scheduled}`} hint={`${scheduled ? Math.round(100*complete/scheduled) : 0}% completed`}/></div>
     <div className="tabs" role="tablist" aria-label="Tournament sections">{([['overview','Overview'],['pools','Pool play & scores'],['playoffs','Playoffs']] as const).map(([key,label]) => <button key={key} role="tab" aria-selected={tab===key} className={tab===key?'active':''} onClick={()=>setTab(key)}>{label}</button>)}</div>
-    {tab === 'overview' && <div className="overview-layout"><div className="white-card"><div className="card-heading"><h2>Competition structure</h2><span className="subtle-tag">Ready to run</span></div><p className="section-desc">Your round-robin schedule has been generated automatically.</p>
-      <div className="structure-rows"><div><span className="structure-icon"><UsersRound size={19}/></span><div><strong>Pool play</strong><small>{bundle.pools.length} pools · {t.pool_sets} fixed set{t.pool_sets>1?'s':''} per matchup · first to {t.target_points}{t.win_by_two ? ', win by 2' : ''}</small></div><CheckCircle2 size={19} className="ok"/></div>
-        {bundle.divisions.length ? bundle.divisions.map(d=><div key={d.id}><span className="structure-icon"><Medal size={19}/></span><div><strong>{d.name} bracket</strong><small>{titleCase(d.format)} elimination · future bracket</small></div><span className="soon">PLANNED</span></div>) : <div><span className="structure-icon"><Medal size={19}/></span><div><strong>Pool-only competition</strong><small>No playoff brackets configured.</small></div></div>}</div>
-      <button className="button button-outline" onClick={() => setTab('pools')}>View pools and schedule <ArrowRight size={16}/></button></div>
+    {tab === 'overview' && <div className="overview-layout"><div className="white-card"><div className="card-heading"><h2>Competition structure</h2><span className="subtle-tag">{structureStatus}</span></div><p className="section-desc">{structureDescription}</p>
+      <div className="structure-rows"><div><span className="structure-icon"><UsersRound size={19}/></span><div><strong>Pool play</strong><small>{bundle.pools.length} pools · {complete}/{scheduled} match results entered · {t.pool_sets} set{t.pool_sets > 1 ? 's' : ''} per matchup</small></div>{poolsComplete ? <CheckCircle2 size={19} className="ok" aria-label="Pool play complete"/> : <span className="soon">{complete > 0 ? 'IN PROGRESS' : 'SCHEDULED'}</span>}</div>
+        {bundle.divisions.length ? bundle.divisions.map(bracket => {
+          const bracketMatches = (bundle.playoffMatches ?? []).filter(match => match.bracket_id === bracket.id);
+          const bracketComplete = bracket.status === 'completed' || Boolean(bracket.champion_team_id);
+          const bracketStarted = bracketComplete || bracket.status === 'active' || bracketMatches.length > 0;
+          const champion = bracket.champion_team_id ? teamName(bracket.champion_team_id) : null;
+          const bracketProgress = bracketComplete ? champion ? `Champion: ${champion}` : 'Championship decided'
+            : bracketStarted ? `${bracketMatches.filter(match => match.status === 'completed').length} match results entered`
+            : 'Awaiting playoff generation';
+          return <div key={bracket.id}><span className="structure-icon"><Medal size={19}/></span>
+            <div><strong>{bracket.name} bracket</strong><small>{titleCase(bracket.format)} elimination · {bracketProgress}</small></div>
+            {bracketComplete ? <CheckCircle2 size={19} className="ok" aria-label={`${bracket.name} bracket completed`}/>
+              : <span className="soon">{bracketStarted ? 'IN PROGRESS' : 'PLANNED'}</span>}
+          </div>;
+        }) : <div><span className="structure-icon"><Medal size={19}/></span><div><strong>Pool-only competition</strong><small>No playoff brackets configured.</small></div>{poolsComplete && <CheckCircle2 size={19} className="ok" aria-label="Pool-only competition completed"/>}</div>}</div>
+      <button className="button button-outline" onClick={() => setTab('pools')}>{poolsComplete ? 'View pool results' : 'View pools and schedule'} <ArrowRight size={16}/></button></div>
       <div className="white-card"><div className="card-heading"><h2>Your pools</h2><span className="subtle-tag">{bundle.pools.length} total</span></div>
         <div className="pool-summary-list">{bundle.pools.map(p => <button key={p.id} onClick={() => {setActivePool(p.id);setTab('pools');}}><span className="pool-letter">{p.label.slice(-1)}</span><div><strong>{p.label}</strong><small>{bundle.poolTeams.filter(x=>x.pool_id===p.id).length} teams · {bundle.matches.filter(x=>x.pool_id===p.id).length} matches</small></div><ChevronRight size={17}/></button>)}</div>
       </div></div>}
