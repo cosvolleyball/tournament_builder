@@ -12,7 +12,7 @@ import type { BracketAssignments, Match, NewTournamentInput, PlannedBracket, Pla
 import { assignPools, createBundle, scoreError, scoringForPool, standingsForPool, validateScoringRules } from './engine';
 import { previewSingleElimination, suggestedAssignments, validateAssignments, playoffRoundCount, rankedPoolTeams, qualifiedTeamIds, distributeQualifiers, suggestedByeFreeWildcards, byeFreeAssignmentsError, type QualificationRule } from './playoffs';
 import { effectiveRoundRule, evaluateSeries, roundRuleError, scorePairs } from './playoffFormats';
-import { addCompetitionDivision, changeStatus, correctPlayoffScore, createTournament, deleteTournament, demoMode, finalizePoolAndCreatePlayoffs, getTournament, listTournaments, submitPlayoffScore, submitScore, supabase } from './repository';
+import { addCompetitionDivision, changeStatus, correctPlayoffScore, createTournament, deleteTournament, demoMode, finalizePoolAndCreatePlayoffs, getTournament, listPublishedTournaments, listTournaments, submitPlayoffScore, submitScore, supabase, type PublishedTournament } from './repository';
 import './style.css';
 
 type Screen = 'home' | 'new' | 'detail' | 'addDivision';
@@ -363,18 +363,67 @@ function App() {
   );
 }
 
-/** Public landing screen never receives or renders an organizer's records. */
+/**
+ * Anonymous homepage: published tournament discovery plus organizer sign-in.
+ * The public query does not retrieve an organizer's drafts or workspace data.
+ */
 function PublicHome({ onSignIn }: { onSignIn: () => void }) {
+  const [published, setPublished] = useState<PublishedTournament[]>([]);
+  const [loadingDirectory, setLoadingDirectory] = useState(true);
+  const [directoryError, setDirectoryError] = useState('');
+  const [refreshCounter, setRefreshCounter] = useState(0);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoadingDirectory(true);
+    setDirectoryError('');
+    listPublishedTournaments()
+      .then(rows => { if (!cancelled) setPublished(rows); })
+      .catch(cause => {
+        if (!cancelled) setDirectoryError(
+          cause instanceof Error ? cause.message : String(cause)
+        );
+      })
+      .finally(() => { if (!cancelled) setLoadingDirectory(false); });
+    return () => { cancelled = true; };
+  }, [refreshCounter]);
+
   return <div className="page-enter public-home">
     <span className="eyebrow">TOURNAMENT MANAGEMENT, SIMPLIFIED</span>
     <div className="page-heading">
-      <div><h1>Run the game.<br/><span>We'll handle the rest.</span></h1>
-        <p>Create tournaments, manage pool play and track scores in one place.</p></div>
+      <div><h1>Find your tournament.<br/><span>Follow every match.</span></h1>
+        <p>Browse published tournaments, view standings and follow playoff brackets without signing in.</p></div>
     </div>
+    <section aria-labelledby="published-tournaments-heading">
+      <div className="section-heading public-directory-heading">
+        <div><h2 id="published-tournaments-heading">Published tournaments</h2>
+          <p>Choose a tournament to view its public schedule, results and playoff brackets.</p></div>
+        <button type="button" className="button button-outline small" onClick={() => setRefreshCounter(n => n + 1)}
+          disabled={loadingDirectory}>Refresh</button>
+      </div>
+      {loadingDirectory ? <div className="public-directory-message" role="status">Loading published tournaments…</div>
+      : directoryError ? <div className="public-directory-message" role="alert">
+        We couldn't load the tournament list. {directoryError}
+        <button type="button" className="text-link" onClick={() => setRefreshCounter(n => n + 1)}>Try again</button>
+      </div>
+      : published.length ? <div className="tournament-grid">
+        {published.map(tournament => <a key={tournament.id} className="t-card public-t-card"
+          href={`${window.location.pathname}?t=${encodeURIComponent(tournament.id)}`}
+          aria-label={`Open ${tournament.name} tournament`}>
+          <div className="t-card-top"><div className="t-icon"><Trophy size={24}/></div>
+            <span className="status-tag live">{statusLabel(tournament.status)}</span></div>
+          <h3>{tournament.name}</h3>
+          <div className="t-card-meta"><span><CalendarDays size={15}/>{tournament.starts_on ?? 'Date to be announced'}</span></div>
+          <div className="t-card-bottom"><span>{tournament.sport}</span>
+            <span className="public-card-open">View tournament <ArrowUpRight size={17}/></span></div>
+        </a>)}
+      </div>
+      : <div className="public-directory-message">There are no published tournaments yet. Check back when an organizer publishes one.</div>}
+    </section>
     <div className="public-welcome white-card">
       <LockKeyhole size={24}/>
-      <h2>Organizer access</h2>
-      <p>Sign in to view and manage your tournaments. Published results can still be viewed using their public links.</p>
+      <h2>Organizing a tournament?</h2>
+      <p>Sign in to create tournaments, enter scores and manage your events.</p>
       <button className="button button-primary" onClick={onSignIn}>Organizer sign in <ArrowRight size={17}/></button>
     </div>
   </div>;

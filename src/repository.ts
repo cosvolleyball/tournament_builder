@@ -74,6 +74,45 @@ export async function listTournaments(userId: string | null): Promise<Tournament
   return rows.map(row => ({...asUiTournament(row, firstDivision.get(row.id)), status:row.status}));
 }
 
+/**
+ * Public directory rows deliberately exclude owner IDs and draft tournaments.
+ * Supabase RLS remains the actual access-control boundary; the client filter
+ * only defines which publicly readable tournament stages appear in the list.
+ */
+export type PublishedTournament = Pick<
+  Tournament, 'id' | 'name' | 'sport' | 'starts_on' | 'status' | 'created_at'
+>;
+
+export async function listPublishedTournaments(): Promise<PublishedTournament[]> {
+  if (demoMode) {
+    return demoBundles().map(({ tournament: t }) => ({
+      id: t.id, name: t.name, sport: t.sport, starts_on: t.starts_on,
+      status: t.status, created_at: t.created_at,
+    })).filter(t => t.status !== 'draft')
+      .sort((a, b) => b.created_at.localeCompare(a.created_at));
+  }
+
+  // The public read policy on `tournaments` exposes only non-draft records.
+  // Select only metadata appropriate for an anonymous visitor.
+  // Supabase may cap each REST response at 1,000 rows. Fetch successive
+  // pages so the directory includes all published tournaments as it grows.
+  const published: PublishedTournament[] = [];
+  const pageSize = 500;
+  for (let offset = 0; ; offset += pageSize) {
+    const { data, error } = await requireDb().from('tournaments')
+      .select('id,name,sport,starts_on,status,created_at')
+      .neq('status', 'draft')
+      .order('created_at', { ascending: false })
+      .order('id', { ascending: true })
+      .range(offset, offset + pageSize - 1);
+    check(error);
+    const page = (data ?? []) as PublishedTournament[];
+    published.push(...page);
+    if (page.length < pageSize) break;
+  }
+  return published;
+}
+
 /** Load the requested custom division, or the first one if unspecified. */
 export async function getTournament(id: string, divisionId?: string | null): Promise<TournamentBundle> {
   if (demoMode) {

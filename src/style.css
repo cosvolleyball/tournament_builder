@@ -289,3 +289,18 @@
 .division-tabs .division-add { display: inline-flex; align-items: center; gap: 6px;
   border-style: dashed; }
 .qualifier-no-byes { margin-top: 16px; }
+
+/* v0.9b: Public tournament directory on the signed-out homepage. */
+.public-directory-heading { align-items: center; }
+.public-directory-heading .button { flex-shrink: 0; }
+.public-directory-message { border: 1px solid #e5ebf4; border-radius: 13px; background: #fff; padding: 28px; color: #697b94; font-size: 13px; line-height: 1.6; }
+.public-directory-message .text-link { margin-left: 10px; }
+.public-t-card { display: block; text-decoration: none; color: inherit; }
+.public-t-card:focus-visible { outline: 3px solid #80aaff; outline-offset: 3px; }
+.public-t-card .t-card-meta { justify-content: flex-start; }
+.public-card-open { display: inline-flex; align-items: center; gap: 5px; font-weight: 800; color: #2b74dc; }
+.public-home .public-welcome { margin-top: 38px; }
+@media(max-width:620px) {
+  .public-directory-heading { align-items: flex-start; gap: 10px; }
+  .public-directory-heading .button { margin-top: 2px; }
+}
