@@ -1,5 +1,5 @@
 /**
- * Tournament Builder data adapter (alpha build).
+ * Tournament Builder data adapter (public beta).
  *
  * The tournament has independent custom competition divisions.
  * Each division owns its teams, pools, matches and playoff brackets.
@@ -122,47 +122,52 @@ export async function getTournament(id: string, divisionId?: string | null): Pro
   }
 
   const db = requireDb();
-  const { data: tournament, error: tError } = await db.from('tournaments')
-    .select('*').eq('id', id).single();
-  check(tError);
-  const { data: compDivisions, error: dError } = await db
-    .from('competition_divisions').select('*').eq('tournament_id', id)
-    .order('sort_order');
-  check(dError);
+  // Fetch tournament metadata and its division list concurrently. They are
+  // independent reads, so this saves one network round-trip on detail load.
+  const [tournamentResult, divisionResult] = await Promise.all([
+    db.from('tournaments').select('*').eq('id', id).single(),
+    db.from('competition_divisions').select('*').eq('tournament_id', id)
+      .order('sort_order'),
+  ]);
+  check(tournamentResult.error);
+  check(divisionResult.error);
+  const tournament = tournamentResult.data;
+  const compDivisions = divisionResult.data;
   const chosen = divisionId
     ? compDivisions?.find(division => division.id === divisionId)
     : compDivisions?.[0];
   if (!chosen) throw new Error('Competition division not found in this tournament.');
 
-  const [teamsResult, poolsResult, poolTeamsResult, matchesResult, bracketsResult, rulesResult] = await Promise.all([
+  // Independent division records (including both pool and playoff fixtures)
+  // load in the same batch instead of fetching playoff fixtures afterward.
+  const [teamsResult, poolsResult, poolTeamsResult, matchesResult, bracketsResult, rulesResult, playoffMatchResult] = await Promise.all([
     db.from('teams').select('*').eq('division_id', chosen.id).order('seed'),
     db.from('pools').select('*').eq('division_id', chosen.id).order('sort_order'),
     db.from('pool_teams').select('*').eq('division_id', chosen.id),
     db.from('matches').select('*').eq('division_id', chosen.id).eq('stage', 'pool').order('sequence'),
     db.from('playoff_brackets').select('*').eq('division_id', chosen.id).order('sort_order'),
     db.from('playoff_round_rules').select('*').eq('division_id', chosen.id).order('round_number'),
+    db.from('matches').select('*').eq('division_id', chosen.id).eq('stage', 'playoff')
+      .order('round_number').order('sequence'),
   ]);
-  for (const result of [teamsResult, poolsResult, poolTeamsResult, matchesResult, bracketsResult, rulesResult]) check(result.error);
+  for (const result of [teamsResult, poolsResult, poolTeamsResult, matchesResult, bracketsResult, rulesResult, playoffMatchResult]) check(result.error);
   const rawMatches = matchesResult.data ?? [];
-  // The `set_scores` table does not have tournament_id; filter by these match IDs.
-  const matchIds = rawMatches.map(m => m.id);
-  // In v0.6, read playoff fixtures separately so pool standings never
-  // accidentally count elimination scores.
-  const playoffMatchResult = await db.from('matches').select('*')
-    .eq('division_id', chosen.id).eq('stage', 'playoff')
-    .order('round_number').order('sequence');
-  check(playoffMatchResult.error);
   const rawPlayoffs = playoffMatchResult.data ?? [];
+  // Score reads depend on the fixture IDs, but not on each other. Request
+  // pool and playoff scores concurrently while keeping their data separated.
+  // Preserve existing query limits and ordering, avoiding schema changes.
+  const matchIds = rawMatches.map(m => m.id);
   const playoffIds = rawPlayoffs.map(m => m.id);
-  const playoffScoreResult = playoffIds.length
-    ? await db.from('set_scores').select('*').in('match_id', playoffIds).order('set_number')
-    : { data: [], error: null };
-  check(playoffScoreResult.error);
-
-  const scoreResult = matchIds.length
-    ? await db.from('set_scores').select('*').in('match_id', matchIds).order('set_number')
-    : { data: [], error: null };
+  const [scoreResult, playoffScoreResult] = await Promise.all([
+    matchIds.length
+      ? db.from('set_scores').select('*').in('match_id', matchIds).order('set_number')
+      : Promise.resolve({ data: [], error: null }),
+    playoffIds.length
+      ? db.from('set_scores').select('*').in('match_id', playoffIds).order('set_number')
+      : Promise.resolve({ data: [], error: null }),
+  ]);
   check(scoreResult.error);
+  check(playoffScoreResult.error);
 
   const teams: Team[] = (teamsResult.data ?? []).map(row => ({
     id: row.id, tournament_id: row.tournament_id, name: row.name, seed: row.seed,
@@ -223,8 +228,8 @@ export async function getTournament(id: string, divisionId?: string | null): Pro
  * Insertion order follows foreign key dependencies. If anything fails,
  * removing the parent tournament cascades all child records.
  *
- * This is adequate for trusted alpha testers; before public beta, create
- * tournaments via a single transactional PostgreSQL RPC for atomicity.
+ * Known limitation: these inserts are not a single server-side transaction.
+ * The cleanup path removes the parent tournament if a child insert fails.
  */
 export async function createTournament(bundle: TournamentBundle, userId: string | null): Promise<void> {
   if (demoMode) { writeDemo([bundle, ...demoBundles()]); return; }
