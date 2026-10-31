@@ -1,11 +1,14 @@
-# Add to .github/workflows/supabase-activity-check.yml
-# Sends a small, read-only database request three times daily.
 name: Supabase Activity Check
 
 on:
+  push:
+    branches: [master]
+    paths:
+      - '.github/workflows/supabase-activity-check.yml'
+
   schedule:
-    # UTC: 05:17, 13:17 and 21:17 every day.
     - cron: '17 5,13,21 * * *'
+
   workflow_dispatch:
 
 permissions:
