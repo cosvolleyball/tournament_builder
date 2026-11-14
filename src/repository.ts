@@ -9,6 +9,7 @@
  * all writes rely on Supabase Auth + database Row Level Security.
  */
 import { createClient, type SupabaseClient } from '@supabase/supabase-js';
+import { readAllPages, readScoresByMatchIds } from './queryPages';
 import type {
   TournamentBundle, Tournament, TournamentStatus, SetScore,
   Team, Pool, PoolTeam, Match, Division, BracketAssignments, PlayoffMatch, PlayoffRoundRule, RoundRulesByBracket,
@@ -140,34 +141,32 @@ export async function getTournament(id: string, divisionId?: string | null): Pro
 
   // Independent division records (including both pool and playoff fixtures)
   // load in the same batch instead of fetching playoff fixtures afterward.
-  const [teamsResult, poolsResult, poolTeamsResult, matchesResult, bracketsResult, rulesResult, playoffMatchResult] = await Promise.all([
+  const [teamsResult, poolsResult, poolTeamsResult, rawMatches, bracketsResult, rulesResult, rawPlayoffs] = await Promise.all([
     db.from('teams').select('*').eq('division_id', chosen.id).order('seed'),
     db.from('pools').select('*').eq('division_id', chosen.id).order('sort_order'),
     db.from('pool_teams').select('*').eq('division_id', chosen.id),
-    db.from('matches').select('*').eq('division_id', chosen.id).eq('stage', 'pool').order('sequence'),
+    readAllPages((start, end) => db.from('matches').select('*')
+      .eq('division_id', chosen.id).eq('stage', 'pool')
+      .order('sequence').order('id').range(start, end)),
     db.from('playoff_brackets').select('*').eq('division_id', chosen.id).order('sort_order'),
     db.from('playoff_round_rules').select('*').eq('division_id', chosen.id).order('round_number'),
-    db.from('matches').select('*').eq('division_id', chosen.id).eq('stage', 'playoff')
-      .order('round_number').order('sequence'),
+    readAllPages((start, end) => db.from('matches').select('*')
+      .eq('division_id', chosen.id).eq('stage', 'playoff')
+      .order('round_number').order('sequence').order('id').range(start, end)),
   ]);
-  for (const result of [teamsResult, poolsResult, poolTeamsResult, matchesResult, bracketsResult, rulesResult, playoffMatchResult]) check(result.error);
-  const rawMatches = matchesResult.data ?? [];
-  const rawPlayoffs = playoffMatchResult.data ?? [];
-  // Score reads depend on the fixture IDs, but not on each other. Request
-  // pool and playoff scores concurrently while keeping their data separated.
-  // Preserve existing query limits and ordering, avoiding schema changes.
+  for (const result of [teamsResult, poolsResult, poolTeamsResult, bracketsResult, rulesResult]) check(result.error);
+
+  // Read score rows in bounded ID groups: one division can have 2,016 pool
+  // matches and 4,032 set scores. A single .in() or select() silently loses
+  // results at the default 1,000-row cap (and can exceed URL length limits).
   const matchIds = rawMatches.map(m => m.id);
   const playoffIds = rawPlayoffs.map(m => m.id);
-  const [scoreResult, playoffScoreResult] = await Promise.all([
-    matchIds.length
-      ? db.from('set_scores').select('*').in('match_id', matchIds).order('set_number')
-      : Promise.resolve({ data: [], error: null }),
-    playoffIds.length
-      ? db.from('set_scores').select('*').in('match_id', playoffIds).order('set_number')
-      : Promise.resolve({ data: [], error: null }),
+  const [scoreRows, playoffScoreRows] = await Promise.all([
+    readScoresByMatchIds(matchIds, (ids, start, end) => db.from('set_scores').select('*')
+      .in('match_id', ids).order('match_id').order('set_number').range(start, end)),
+    readScoresByMatchIds(playoffIds, (ids, start, end) => db.from('set_scores').select('*')
+      .in('match_id', ids).order('match_id').order('set_number').range(start, end)),
   ]);
-  check(scoreResult.error);
-  check(playoffScoreResult.error);
 
   const teams: Team[] = (teamsResult.data ?? []).map(row => ({
     id: row.id, tournament_id: row.tournament_id, name: row.name, seed: row.seed,
@@ -191,7 +190,7 @@ export async function getTournament(id: string, divisionId?: string | null): Pro
     id: row.id, tournament_id: row.tournament_id, name: row.name,
     format: row.format, bracket_reset: row.bracket_reset, sort_order: row.sort_order, status: row.status, champion_team_id: row.champion_team_id ?? null,
   }));
-  const scores: SetScore[] = (scoreResult.data ?? []).map(row => ({
+  const scores: SetScore[] = scoreRows.map(row => ({
     match_id: row.match_id, set_number: row.set_number, score_a: row.score_a, score_b: row.score_b,
   }));
   const playoffMatches: PlayoffMatch[] = rawPlayoffs.map(row => ({
@@ -200,7 +199,7 @@ export async function getTournament(id: string, divisionId?: string | null): Pro
     round_number: row.round_number, sequence: row.sequence, status: row.status,
     playoff_phase: row.playoff_phase ?? 'upper',
   }));
-  const playoffScores: SetScore[] = (playoffScoreResult.data ?? []).map(row => ({
+  const playoffScores: SetScore[] = playoffScoreRows.map(row => ({
     match_id: row.match_id, set_number: row.set_number,
     score_a: row.score_a, score_b: row.score_b,
   }));
