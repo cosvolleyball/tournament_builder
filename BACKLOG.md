@@ -10,7 +10,6 @@ This file is the source of truth for remaining work. When something is completed
 
 ## Next: verification
 
-- [ ] **Large-tournament live-data smoke test.** Pagination fix from [PR #1](https://github.com/cosvolleyball/tournament_builder/pull/1) is **merged and deployed** ([successful Actions deployment](https://github.com/cosvolleyball/tournament_builder/actions/runs/43655567009)); automated pagination tests passed (37/37 total tests on QA branch). Verify a real test tournament with >1,000 pool matches or set-score rows loads completely before marking real-data verification done.
 - [ ] **Live Supabase integration testing.** On disposable test tournaments, verify double-elimination advancement (including byes and grand-final reset/no reset), score corrections and downstream match routing, and independent progression of custom divisions. Cover representative sizes such as 5, 8, 14, and 16 teams. **Unit tests do not replace database integration tests.**
 - [ ] **Live authorization testing.** As anonymous, organizer A, and organizer B, verify that drafts are not publicly readable, an organizer cannot edit another organizer's tournaments, and public score entry cannot overwrite a completed result. Test against disposable tournament records.
 - [ ] **Mobile usability check.** Test tournament navigation, horizontal bracket scrolling, and score-entry dialogs on an actual phone; address any reproduced issues.
@@ -29,6 +28,7 @@ This file is the source of truth for remaining work. When something is completed
 
 - **Score submission responsiveness:** Previously intermittent slow/closing score modal; not reproduced recently. Investigate only if the issue returns with reproducible steps.
 - **Performance and usability:** Respond to real beta-tester reports rather than making speculative changes.
+- **Very large tournaments / pagination:** [PR #1](https://github.com/cosvolleyball/tournament_builder/pull/1) was merged and deployed, and automated tests passed (37/37 total tests on QA branch). Deliberately defer creating a >1,000-row live tournament or requesting manual verification; revisit only if real user feedback shows a need.
 
 ## Already completed / verified
 
