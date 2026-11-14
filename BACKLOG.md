@@ -10,7 +10,7 @@ This file is the source of truth for remaining work. When something is completed
 
 ## Next: verification
 
-- [ ] **Large-tournament pagination fix: merge and verify.** [PR #1](https://github.com/cosvolleyball/tournament_builder/pull/1) fixes a 1,000-row read cap that affects large one-pool tournaments (e.g., 33 teams with two sets: 1,056 score rows). QA branch passed 37/37 unit tests and a production build. **Not yet merged or deployed.** After merging, smoke-test a large tournament's loaded scores; no real tournament data needs to be modified for the merge.
+- [ ] **Large-tournament live-data smoke test.** Pagination fix from [PR #1](https://github.com/cosvolleyball/tournament_builder/pull/1) is **merged and deployed** ([successful Actions deployment](https://github.com/cosvolleyball/tournament_builder/actions/runs/43655567009)); automated pagination tests passed (37/37 total tests on QA branch). Verify a real test tournament with >1,000 pool matches or set-score rows loads completely before marking real-data verification done.
 - [ ] **Live Supabase integration testing.** On disposable test tournaments, verify double-elimination advancement (including byes and grand-final reset/no reset), score corrections and downstream match routing, and independent progression of custom divisions. Cover representative sizes such as 5, 8, 14, and 16 teams. **Unit tests do not replace database integration tests.**
 - [ ] **Live authorization testing.** As anonymous, organizer A, and organizer B, verify that drafts are not publicly readable, an organizer cannot edit another organizer's tournaments, and public score entry cannot overwrite a completed result. Test against disposable tournament records.
 - [ ] **Mobile usability check.** Test tournament navigation, horizontal bracket scrolling, and score-entry dialogs on an actual phone; address any reproduced issues.
@@ -38,6 +38,7 @@ This file is the source of truth for remaining work. When something is completed
 - [x] Read-only Supabase permission audit: RLS enabled on 11 audited tables; no direct anonymous table-write grants.
 - [x] Security hardening verified in Supabase: anonymous execution of the RLS event-trigger function blocked; public playoff scoring retained; explicit draft guard present.
 - [x] GitHub Actions Supabase activity check running successfully.
+- [x] November 14, 2026: PR #1 merged and GitHub Pages deployment succeeded; paginated pool/playoff fixture and score reads are live.
 - [x] November 14, 2026: 95,294 additional local checks passed for round-robin schedules, seeds, byes, playoff qualification, volleyball scoring/series completion and division data independence. These checks were run against the checked-out TypeScript logic, not live Supabase RPCs.
 - [x] November 14, 2026: isolated GitHub QA branch built successfully and passed 37/37 Vitest tests (five new pagination tests); [CI run](https://github.com/cosvolleyball/tournament_builder/actions/runs/43654818036).
 - [x] November 14, 2026: read-only live anonymous Supabase smoke test: queries to 11 tables succeeded; no draft rows exposed. **No public tournaments or matches were visible**, so real-data visibility and owner-isolation authorization remain unverified; [CI run](https://github.com/cosvolleyball/tournament_builder/actions/runs/43655063516).
