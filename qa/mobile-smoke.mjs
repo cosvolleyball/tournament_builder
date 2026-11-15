@@ -69,7 +69,18 @@ for(const width of [360,390,768]){
     await dlg.getByRole('button',{name:/Save result/}).click();
     await dlg.waitFor({state:'hidden',timeout:10000});
     if(await page.getByText('Final score').count()<1)throw Error('Score not reflected in pool');
-    return {width,created:true,published:true,scored:true,modal:'fits'};
+    await page.getByRole('tab',{name:/Playoffs/i}).click();
+    const bracket=page.getByRole('region',{name:/Championship upper bracket preview/i});
+    await bracket.waitFor();
+    const overflow=await bracket.evaluate(el=>({scrollWidth:el.scrollWidth,clientWidth:el.clientWidth}));
+    if(width<=390 && overflow.scrollWidth<=overflow.clientWidth)throw Error('Preview bracket should scroll horizontally on phone');
+    if(overflow.scrollWidth>overflow.clientWidth){
+      await bracket.evaluate(el=>{el.scrollLeft=el.scrollWidth;});
+      const scrolled=await bracket.evaluate(el=>el.scrollLeft);
+      if(scrolled<=0)throw Error('Bracket viewport is not horizontally scrollable');
+    }
+    await checkNoOverflow(page,'playoff preview');
+    return {width,created:true,published:true,scored:true,modal:'fits',bracket:'scrollable',bracketWidth:overflow};
   } finally {await page.close();}
  });
 }
