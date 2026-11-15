@@ -1,8 +1,7 @@
-name: Mobile UI smoke (QA only)
+name: Mobile UI smoke (manual QA, no deployment)
 
 on:
-  push:
-    branches: [qa/mobile-smoke-2026-11]
+  workflow_dispatch:
 
 permissions:
   contents: read
