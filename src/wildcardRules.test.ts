@@ -87,7 +87,6 @@ describe('wildcard selection with completed realistic results',()=>{
 
   it('uses deterministic seeding when all two-set round robins finish 1-1 with identical points',()=>{
     const b=make(14,3,2);
-    const seed=new Map(b.teams.map(t=>[t.id,t.seed]));
     for(const match of b.matches){
       match.status='completed';
       b.scores.push({match_id:match.id,set_number:1,score_a:21,score_b:19});
