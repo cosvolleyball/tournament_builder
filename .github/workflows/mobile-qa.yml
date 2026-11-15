@@ -1,0 +1,37 @@
+name: Mobile UI smoke (QA only)
+
+on:
+  push:
+    branches: [qa/mobile-smoke-2026-11]
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci
+      - name: Install temporary browser automation (no lockfile changes)
+        run: npm install --no-save --package-lock=false playwright@1.56.1
+      - name: Start local Vite demo (no Supabase credentials)
+        run: |
+          VITE_SUPABASE_URL= VITE_SUPABASE_PUBLISHABLE_KEY= npm run dev -- --host 127.0.0.1 --port 4177 > /tmp/vite-qa.log 2>&1 &
+          echo $! > /tmp/vite-qa.pid
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:4177/ >/dev/null; then exit 0; fi
+            sleep 1
+          done
+          cat /tmp/vite-qa.log
+          exit 1
+      - name: Run browser smoke at mobile/tablet/desktop widths
+        run: node qa/mobile-smoke.mjs
+      - name: Include Vite diagnostics on failure
+        if: failure()
+        run: cat /tmp/vite-qa.log || true
