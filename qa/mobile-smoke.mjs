@@ -50,6 +50,7 @@ for(const width of [360,390,768]){
     await page.locator('#teams').fill('Eagles\nBears\nFalcons\nWolves');
     await page.locator('#poolCount').fill('2');
     await page.locator('#sets').selectOption('1');
+    await page.locator('#bracket-format-0').selectOption('double');
     await checkNoOverflow(page,'wizard');
     await page.getByRole('button',{name:/^Create tournament/}).last().click();
     await page.getByRole('heading',{name:'Mobile QA Cup'}).waitFor({timeout:15000});
