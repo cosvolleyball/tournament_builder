@@ -18,10 +18,12 @@ were changed. These tests are manual and must not be added to scheduled CI again
 | Simultaneous anonymous HTTP pool submissions | One HTTP 204, one HTTP 400; exactly the accepted score stored |
 | Simultaneous anonymous HTTP playoff submissions | One HTTP 204, one HTTP 400; exactly the accepted score stored |
 | Wildcard database/frontend parity | 26 live scores from 5/5/4 pools; top two plus two wildcards = 8 teams, zero first-round byes |
+| Real organizer browser workflow | Login, draft creation, second custom division, reload, publish/start, scoring/corrections, separate finalization and full double-elimination completion passed |
+| Logout and public browser access | Redirected home; back did not restore workspace; completed public bracket had no edit/organizer controls |
 | Existing Vitest suite | 42/42 passed |
 | TypeScript / Vite build | Passed, including a build with the project's publishable client configuration |
 | Production dependency audit | `npm audit --omit=dev`: zero reported vulnerabilities |
-| Cleanup | Zero test tournaments remain; committed HTTP fixture and synthetic Auth user deleted |
+| Cleanup | Zero test tournaments remain; committed HTTP fixture and synthetic Auth user deleted; browser fixture parent/divisions/matches deleted |
 
 The bracket tests check upper and lower advancement after every result, structural byes,
 champion/loss counts, reset and no-reset outcomes, and corrections to both winner and loser
@@ -94,12 +96,25 @@ completed that cleanup. Never run this script on an existing event.
 
 ## Limits
 
-These results prove live database RPC/RLS behavior and anonymous PostgREST behavior.
-Organizer A/B authorization was exercised via database roles/claims, **not** by obtaining
-real GoTrue access tokens or logging two browsers in and out. Authenticated HTTP session
-handling, refresh/logout/back-button behavior, and authenticated browser workflows remain
-unverified by this run. They require disposable organizer sessions or a dedicated staging
-Auth environment. No existing account password or session was changed.
+These results prove live database RPC/RLS behavior, anonymous PostgREST behavior, and
+one real organizer's authenticated browser workflow. After secure user-provided login,
+the browser created a separate disposable tournament with custom A and BB divisions,
+reloaded its private draft, published/started it, submitted seven pool results, corrected
+a two-set result and verified standings, finalized the pool-only BB division while A
+remained active, generated a bye-free four-team double-elimination bracket, submitted
+six playoff results, corrected an early winner and verified both next slots, and displayed
+the champion. Sign-out returned home; Back did not restore the organizer workspace.
+Reopening the completed public bracket exposed no edit, delete, copy-link or finalization
+controls. No site-origin console errors were observed (browser-extension metadata errors
+were excluded). The disposable parent and all divisions/matches were then deleted through
+an exact-ID/name connector cleanup; zero remaining rows were verified. The existing
+organizer account was not deleted or changed, and no existing tournaments were edited.
+
+Organizer A/B database authorization used synthetic role/claim contexts, not two actual
+GoTrue sessions. A second real organizer browser identity and time-based token-expiry/
+renewal behavior were not exercised. Reload persistence was verified, but is not a claim
+that forced token refresh or revocation was tested. No existing account password was
+changed. These are explicit coverage limits rather than passing results.
 
 The HTTP races cover duplicate submissions to the same match, not load testing or all
 possible multi-match locking schedules. Mobile browser smoke coverage is documented in
