@@ -13,7 +13,7 @@ This file is the source of truth for remaining work. When something is completed
 - [ ] **Live Supabase integration testing.** On disposable test tournaments, verify double-elimination advancement (including byes and grand-final reset/no reset), score corrections and downstream match routing, and independent progression of custom divisions. Cover representative sizes such as 5, 8, 14, and 16 teams. **Unit tests do not replace database integration tests.**
 - [ ] **Live authorization testing.** As anonymous, organizer A, and organizer B, verify that drafts are not publicly readable, an organizer cannot edit another organizer's tournaments, and public score entry cannot overwrite a completed result. Test against disposable tournament records.
 - [ ] **Mobile usability check.** Test tournament navigation, horizontal bracket scrolling, and score-entry dialogs on an actual phone; address any reproduced issues.
-- [ ] **Wildcard ranking/tiebreaker rules review.** Confirm intended policy for uneven pools, ties, different scoring formats, and bye-free playoff qualification. Adjust only if the desired real-world rules differ from the implementation.
+- [ ] **Wildcard ranking/tiebreaker rules review (policy confirmation only).** Reviewed current TypeScript preview and added five completed-score regression tests on QA branch ([CI run](https://github.com/cosvolleyball/tournament_builder/actions/runs/43656184851), 42/42 passed with build). Present policy: place first, then set-win %, point ratio, average point differential, initial seed; two-team pool ties use head-to-head. Await organizer approval of these tiebreakers. Production Supabase finalization rules are not yet independently verified against the client preview.
 
 ## Later: product features
 
