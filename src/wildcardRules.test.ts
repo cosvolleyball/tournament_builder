@@ -106,7 +106,9 @@ describe('wildcard selection with completed realistic results',()=>{
   });
 
   it('reports when next-place wildcards cannot fill a no-bye bracket',()=>{
-    const b=make(5,1);
-    expect(suggestedByeFreeWildcards(b,2)).toMatchObject({count:2,target:4,available:1,possible:false});
+    const b=make(14,3);
+    // Nine automatic entrants need a 16-team field, but only three next-place
+    // candidates are available (one from each of the 5/5/4 pools).
+    expect(suggestedByeFreeWildcards(b,3)).toMatchObject({count:7,target:16,available:3,possible:false});
   });
 });
